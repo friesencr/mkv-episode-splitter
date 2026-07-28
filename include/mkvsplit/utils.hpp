@@ -16,4 +16,7 @@ std::string FormatBytes(uint64_t bytes);
 // Format duration in human readable format (e.g. "01h 15m 30s")
 std::string FormatDuration(double seconds);
 
+// Truncate string with ellipsis if longer than max_len
+std::string TruncateString(const std::string& str, size_t max_len);
+
 } // namespace mkvsplit

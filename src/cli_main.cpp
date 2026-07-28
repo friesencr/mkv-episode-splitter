@@ -228,13 +228,20 @@ int RunInteractiveMode(std::string input_file = "") {
     std::cout << "========================================================\n";
 
     auto progress_cb = [](const mkvsplit::ProgressInfo& info) {
-        int bar_width = 30;
+        int bar_width = 18;
         int filled = static_cast<int>((info.overall_progress / 100.0) * bar_width);
         std::string bar = std::string(filled, '=') + (filled < bar_width ? ">" : "") + std::string(std::max(0, bar_width - filled - 1), ' ');
+        std::string truncated_fn = mkvsplit::TruncateString(info.current_output_filename, 22);
 
-        std::cout << "\r[" << bar << "] " << std::setw(3) << static_cast<int>(info.overall_progress) << "% | "
-                  << "Seg " << info.current_segment_index << "/" << info.total_segments << " (" << info.current_output_filename << ") - "
-                  << mkvsplit::FormatBytes(info.bytes_written) << " written" << std::flush;
+        std::ostringstream ss;
+        ss << "[" << bar << "] " << std::setw(3) << static_cast<int>(info.overall_progress) << "% | "
+           << "Seg " << info.current_segment_index << "/" << info.total_segments << " (" << truncated_fn << ") - "
+           << mkvsplit::FormatBytes(info.bytes_written) << " written";
+
+        std::string line = ss.str();
+        if (line.length() > 75) line = line.substr(0, 75);
+
+        std::cout << "\r" << line << "\033[K" << std::flush;
     };
 
     bool success = mkvsplit::MKVSplitter::Split(config, progress_cb, &err_msg);
@@ -438,10 +445,18 @@ int main(int argc, char* argv[]) {
     std::cout << "\nSplitting lossless streams to " << output_dir << "...\n";
 
     auto progress_cb = [](const mkvsplit::ProgressInfo& info) {
-        std::cout << "\r[" << std::setw(3) << static_cast<int>(info.overall_progress) << "%] "
-                  << "Segment " << info.current_segment_index << "/" << info.total_segments
-                  << " (" << info.current_output_filename << ") - "
-                  << mkvsplit::FormatBytes(info.bytes_written) << " written" << std::flush;
+        std::string truncated_fn = mkvsplit::TruncateString(info.current_output_filename, 22);
+
+        std::ostringstream ss;
+        ss << "[" << std::setw(3) << static_cast<int>(info.overall_progress) << "%] "
+           << "Segment " << info.current_segment_index << "/" << info.total_segments
+           << " (" << truncated_fn << ") - "
+           << mkvsplit::FormatBytes(info.bytes_written) << " written";
+
+        std::string line = ss.str();
+        if (line.length() > 75) line = line.substr(0, 75);
+
+        std::cout << "\r" << line << "\033[K" << std::flush;
     };
 
     bool success = mkvsplit::MKVSplitter::Split(config, progress_cb, &err_msg);

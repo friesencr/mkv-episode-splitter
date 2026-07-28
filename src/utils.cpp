@@ -101,4 +101,11 @@ std::string FormatDuration(double seconds) {
     return oss.str();
 }
 
+std::string TruncateString(const std::string& str, size_t max_len) {
+    if (str.length() <= max_len) return str;
+    if (max_len <= 3) return str.substr(0, max_len);
+    size_t half = (max_len - 3) / 2;
+    return str.substr(0, half) + "..." + str.substr(str.length() - (max_len - 3 - half));
+}
+
 } // namespace mkvsplit

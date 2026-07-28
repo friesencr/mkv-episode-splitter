@@ -8,6 +8,7 @@ extern "C" {
 #include <libavformat/avformat.h>
 #include <libavcodec/avcodec.h>
 #include <libavutil/avutil.h>
+#include <libavutil/log.h>
 #include <libavutil/timestamp.h>
 #include <libavutil/opt.h>
 #include <libavutil/mathematics.h>
@@ -22,6 +23,7 @@ static std::string AvErr2Str(int errnum) {
 }
 
 bool FFmpegDemuxer::ReadMetadata(const std::filesystem::path& file_path, MKVMetadata& out_metadata, std::string* error_msg) {
+    av_log_set_level(AV_LOG_ERROR);
     AVFormatContext* fmt_ctx = nullptr;
     std::string path_str = file_path.string();
 
@@ -478,6 +480,7 @@ bool FFmpegDemuxer::WriteSegment(const std::filesystem::path& input_path,
                                  double end_sec,
                                  std::function<void(double current_sec, uint64_t bytes)> progress_cb,
                                  std::string* error_msg) {
+    av_log_set_level(AV_LOG_ERROR);
     AVFormatContext* ifmt_ctx = nullptr;
     AVFormatContext* ofmt_ctx = nullptr;
     std::string in_str = input_path.string();
