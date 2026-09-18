@@ -601,7 +601,9 @@ bool FFmpegDemuxer::WriteSegment(const std::filesystem::path& input_path,
     if (start_sec > 0.0) {
         if (video_stream_idx >= 0) {
             AVStream* vst = ifmt_ctx->streams[video_stream_idx];
-            int64_t vst_ts = static_cast<int64_t>((start_sec - 0.5) / av_q2d(vst->time_base));
+            // Seek at the requested boundary. Subtracting a preroll here skips
+            // an exact boundary keyframe and can repeat an entire previous GOP.
+            int64_t vst_ts = static_cast<int64_t>(std::llround(start_sec / av_q2d(vst->time_base)));
             if (vst_ts < 0) vst_ts = 0;
             av_seek_frame(ifmt_ctx, video_stream_idx, vst_ts, AVSEEK_FLAG_BACKWARD);
         } else {

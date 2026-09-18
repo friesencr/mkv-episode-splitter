@@ -126,6 +126,25 @@ int main() {
     std::cout << "  - Black frame episode gap detected at: " << black_gaps[0] << " s\n";
     std::cout << "PASSED: Black frame episode gap detection verified.\n\n";
 
+    std::cout << "[Test 11] Exact keyframe boundaries must not repeat the previous GOP...\n";
+    auto long_gop = test_dir / "long_gop.mkv";
+    std::string long_gop_cmd = "ffmpeg -y -v error -f lavfi -i testsrc2=duration=12:size=160x90:rate=24 "
+                               "-c:v libx264 -g 120 -keyint_min 120 -sc_threshold 0 "
+                               "\"" + long_gop.string() + "\"";
+    assert(std::system(long_gop_cmd.c_str()) == 0);
+    mkvsplit::SplitConfig exact_cfg;
+    exact_cfg.input_file = long_gop;
+    exact_cfg.output_directory = test_dir / "out_exact";
+    exact_cfg.mode = mkvsplit::SplitMode::TimeRange;
+    exact_cfg.range_start_sec = 5.0;
+    exact_cfg.range_end_sec = 10.0;
+    err.clear();
+    bool exact_ok = mkvsplit::MKVSplitter::Split(exact_cfg, nullptr, &err);
+    assert(exact_ok && err.empty());
+    auto exact_meta = mkvsplit::MKVSplitter::InspectFile(exact_cfg.output_directory / "split_long_gop_part1.mkv");
+    assert(exact_meta.duration_sec >= 4.9 && exact_meta.duration_sec < 5.2);
+    std::cout << "PASSED: Exact boundary starts at the requested keyframe.\n\n";
+
     std::cout << "========================================================\n";
     std::cout << " ALL AUTOMATED TESTS COMPLETED SUCCESSFULLY!\n";
     std::cout << "========================================================\n";
