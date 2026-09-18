@@ -86,6 +86,8 @@ struct SplitConfig {
     uint64_t chunk_max_bytes = 500 * 1024 * 1024; // Default 500 MB
     std::vector<int> selected_chapter_ids;
     int chapter_group_count = 0; // If > 0, group K chapters into 1 episode segment (e.g. 5 chapters per episode)
+    int lead_bumper_chapters = 0; // Number of leading chapters identified as bumpers (e.g. studio logo)
+    int tail_bumper_chapters = 0; // Number of trailing chapters identified as bumpers (e.g. disc outro/copyright)
     int season_number = 0;        // Season number (0 = auto-detect or default S01)
     int start_episode_number = 0; // Starting episode number (0 = auto-detect or default E01)
     GapDetectionConfig gap_config;

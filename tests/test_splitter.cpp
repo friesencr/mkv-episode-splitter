@@ -126,6 +126,180 @@ int main() {
     std::cout << "  - Black frame episode gap detected at: " << black_gaps[0] << " s\n";
     std::cout << "PASSED: Black frame episode gap detection verified.\n\n";
 
+    std::cout << "[Test 7] Testing Cyclical Pattern Auto-Guessing (MKVSplitter::GuessSplitConfig)...\n";
+    mkvsplit::MKVMetadata cyclic_meta;
+    cyclic_meta.file_path = "synthetic_multi_episode.mkv";
+    
+    // Simulate 20 chapters over 4 episodes (5 chapters per episode)
+    // Structure per episode: OP (90s), Act 1 (500s), Act 2 (500s), Act 3 (300s), ED (90s) -> total 1480s (~24.6m) per episode
+    double cur_t = 0.0;
+    double ep_pattern[5] = {90.0, 500.0, 500.0, 300.0, 90.0};
+    for (int ep = 0; ep < 4; ep++) {
+        for (int ch = 0; ch < 5; ch++) {
+            mkvsplit::ChapterInfo cinfo;
+            cinfo.id = ep * 5 + ch;
+            cinfo.start_time_sec = cur_t;
+            cur_t += ep_pattern[ch];
+            cinfo.end_time_sec = cur_t;
+            cinfo.title = "Chapter " + std::to_string(cinfo.id + 1);
+            cyclic_meta.chapters.push_back(cinfo);
+        }
+    }
+    cyclic_meta.duration_sec = cur_t;
+
+    mkvsplit::AutoGuessResult guess = mkvsplit::MKVSplitter::GuessSplitConfig(cyclic_meta);
+    assert(guess.recommended_config.mode == mkvsplit::SplitMode::Chapters);
+    assert(guess.recommended_config.chapter_group_count == 5);
+    assert(guess.confidence_percent >= 90);
+    std::cout << "  - Recommended mode: Chapters (Group count: " << guess.recommended_config.chapter_group_count << ")\n";
+    std::cout << "  - Confidence: " << guess.confidence_percent << "%\n";
+    std::cout << "  - Reasoning: " << guess.reasoning << "\n";
+
+    // Test Case 7b: 1-chapter per episode cyclic detection (6 episodes of 24m)
+    mkvsplit::MKVMetadata single_ch_meta;
+    single_ch_meta.file_path = "synthetic_single_ch.mkv";
+    double cur_t2 = 0.0;
+    for (int ch = 0; ch < 6; ch++) {
+        mkvsplit::ChapterInfo cinfo;
+        cinfo.id = ch;
+        cinfo.start_time_sec = cur_t2;
+        cur_t2 += 1440.0; // 24 mins
+        cinfo.end_time_sec = cur_t2;
+        cinfo.title = "Episode " + std::to_string(ch + 1);
+        single_ch_meta.chapters.push_back(cinfo);
+    }
+    single_ch_meta.duration_sec = cur_t2;
+
+    mkvsplit::AutoGuessResult guess2 = mkvsplit::MKVSplitter::GuessSplitConfig(single_ch_meta);
+    assert(guess2.recommended_config.mode == mkvsplit::SplitMode::Chapters);
+    assert(guess2.recommended_config.chapter_group_count == 1);
+    assert(guess2.confidence_percent == 98);
+    std::cout << "  - Single chapter per ep detected: Group count = " << guess2.recommended_config.chapter_group_count << " (Confidence: " << guess2.confidence_percent << "%)\n";
+
+    std::cout << "PASSED: Cyclical pattern auto-guessing correctly identified 5 chapters per episode and single-chapter episode structures.\n\n";
+
+    std::cout << "[Test 8] Testing Brute-Force Chapter Symmetry with Lead & Tail Bumpers...\n";
+    mkvsplit::MKVMetadata bumper_meta;
+    bumper_meta.file_path = "synthetic_bumper_disc.mkv";
+    double cur_t3 = 0.0;
+
+    // Lead bumper: 15s studio logo
+    mkvsplit::ChapterInfo lead_ch;
+    lead_ch.id = 0;
+    lead_ch.start_time_sec = cur_t3;
+    cur_t3 += 15.0;
+    lead_ch.end_time_sec = cur_t3;
+    lead_ch.title = "Studio Logo";
+    bumper_meta.chapters.push_back(lead_ch);
+
+    // 4 episodes of 4 chapters each: OP(90s), Act 1(600s), Act 2(600s), ED(90s) = 1380s (~23m)
+    double b_ep_pattern[4] = {90.0, 600.0, 600.0, 90.0};
+    for (int ep = 0; ep < 4; ep++) {
+        for (int ch = 0; ch < 4; ch++) {
+            mkvsplit::ChapterInfo cinfo;
+            cinfo.id = 1 + ep * 4 + ch;
+            cinfo.start_time_sec = cur_t3;
+            cur_t3 += b_ep_pattern[ch];
+            cinfo.end_time_sec = cur_t3;
+            cinfo.title = "Ep " + std::to_string(ep + 1) + " Part " + std::to_string(ch + 1);
+            bumper_meta.chapters.push_back(cinfo);
+        }
+    }
+
+    // Tail bumper: 25s copyright screen
+    mkvsplit::ChapterInfo tail_ch;
+    tail_ch.id = 17;
+    tail_ch.start_time_sec = cur_t3;
+    cur_t3 += 25.0;
+    tail_ch.end_time_sec = cur_t3;
+    tail_ch.title = "Disc Outro";
+    bumper_meta.chapters.push_back(tail_ch);
+    bumper_meta.duration_sec = cur_t3;
+
+    mkvsplit::AutoGuessResult guess3 = mkvsplit::MKVSplitter::GuessSplitConfig(bumper_meta);
+    assert(guess3.recommended_config.mode == mkvsplit::SplitMode::Chapters);
+    assert(guess3.recommended_config.chapter_group_count == 4);
+    assert(guess3.recommended_config.lead_bumper_chapters == 1);
+    assert(guess3.recommended_config.tail_bumper_chapters == 1);
+    assert(guess3.confidence_percent >= 90);
+    std::cout << "  - Auto-detected: " << guess3.recommended_config.lead_bumper_chapters << " lead bumper, "
+              << guess3.recommended_config.tail_bumper_chapters << " tail bumper, "
+              << guess3.recommended_config.chapter_group_count << " chapters/episode\n";
+    std::cout << "  - Confidence: " << guess3.confidence_percent << "%\n";
+    std::cout << "  - Reasoning: " << guess3.reasoning << "\n";
+    std::cout << "PASSED: Lead and tail bumpers successfully identified by brute force search.\n\n";
+
+    std::cout << "[Test 9] Testing Short-Format / Mrs. Pepperpot Symmetry with Duration Jitter (Wiggle Room)...\n";
+    mkvsplit::MKVMetadata pepperpot_meta;
+    pepperpot_meta.file_path = "mrs_pepperpot_disc.mkv";
+    double cur_t4 = 0.0;
+    // 8 episodes of ~7.5 minutes each with realistic duration jitter (+/- 20s)
+    double ep_stories[8] = {390.0, 415.0, 395.0, 410.0, 403.0, 407.0, 394.0, 420.0};
+    for (int ep = 0; ep < 8; ep++) {
+        // Ch 1: Theme song (45s)
+        mkvsplit::ChapterInfo op_ch;
+        op_ch.id = ep * 2;
+        op_ch.start_time_sec = cur_t4;
+        cur_t4 += 45.0;
+        op_ch.end_time_sec = cur_t4;
+        op_ch.title = "Episode " + std::to_string(ep + 1) + " OP";
+        pepperpot_meta.chapters.push_back(op_ch);
+
+        // Ch 2: Story
+        mkvsplit::ChapterInfo st_ch;
+        st_ch.id = ep * 2 + 1;
+        st_ch.start_time_sec = cur_t4;
+        cur_t4 += ep_stories[ep];
+        st_ch.end_time_sec = cur_t4;
+        st_ch.title = "Episode " + std::to_string(ep + 1) + " Story";
+        pepperpot_meta.chapters.push_back(st_ch);
+    }
+    pepperpot_meta.duration_sec = cur_t4;
+
+    mkvsplit::AutoGuessResult guess4 = mkvsplit::MKVSplitter::GuessSplitConfig(pepperpot_meta);
+    assert(guess4.recommended_config.mode == mkvsplit::SplitMode::Chapters);
+    assert(guess4.recommended_config.chapter_group_count == 2);
+    assert(guess4.recommended_config.lead_bumper_chapters == 0);
+    assert(guess4.recommended_config.tail_bumper_chapters == 0);
+    assert(guess4.confidence_percent >= 90);
+    std::cout << "  - Auto-detected: " << guess4.recommended_config.chapter_group_count << " chapters/episode across 8 episodes\n";
+    std::cout << "  - Confidence: " << guess4.confidence_percent << "%\n";
+    std::cout << "  - Reasoning: " << guess4.reasoning << "\n";
+    std::cout << "PASSED: Short-format show (Mrs. Pepperpot style) detected with high confidence despite duration jitter.\n\n";
+
+    std::cout << "[Test 10] Testing Segment Planning with Bumper Actions (Separate, Merge, Discard)...\n";
+    mkvsplit::SplitConfig plan_cfg = guess3.recommended_config;
+    plan_cfg.input_file = "synthetic_bumper_disc.mkv";
+
+    // 10a: Separate bumpers
+    plan_cfg.bumper_action = mkvsplit::BumperAction::Separate;
+    std::vector<mkvsplit::SplitSegment> plan_sep = mkvsplit::MKVSplitter::PlanSegments(bumper_meta, plan_cfg);
+    assert(plan_sep.size() == 6); // 1 lead + 4 eps + 1 tail
+    assert(plan_sep[0].name_tag == "disc_intro");
+    assert(plan_sep[0].end_time_sec == 15.0);
+    assert(plan_sep[1].name_tag == "S01E01");
+    assert(plan_sep[4].name_tag == "S01E04");
+    assert(plan_sep[5].name_tag == "disc_outro");
+    std::cout << "  - Separate bumpers: produced " << plan_sep.size() << " segments (disc_intro, 4 episodes, disc_outro)\n";
+
+    // 10b: Merge bumpers
+    plan_cfg.bumper_action = mkvsplit::BumperAction::Merge;
+    std::vector<mkvsplit::SplitSegment> plan_merge = mkvsplit::MKVSplitter::PlanSegments(bumper_meta, plan_cfg);
+    assert(plan_merge.size() == 4); // 4 episodes
+    assert(plan_merge[0].name_tag == "S01E01" && plan_merge[0].start_time_sec == 0.0);
+    assert(plan_merge[3].name_tag == "S01E04" && plan_merge[3].end_time_sec == bumper_meta.duration_sec);
+    std::cout << "  - Merge bumpers: produced " << plan_merge.size() << " episodes with bumper timestamps merged\n";
+
+    // 10c: Discard bumpers
+    plan_cfg.bumper_action = mkvsplit::BumperAction::Discard;
+    std::vector<mkvsplit::SplitSegment> plan_disc = mkvsplit::MKVSplitter::PlanSegments(bumper_meta, plan_cfg);
+    assert(plan_disc.size() == 4); // 4 episodes
+    assert(plan_disc[0].name_tag == "S01E01" && plan_disc[0].start_time_sec == 15.0);
+    assert(plan_disc[3].name_tag == "S01E04" && plan_disc[3].end_time_sec == bumper_meta.duration_sec - 25.0);
+    std::cout << "  - Discard bumpers: produced " << plan_disc.size() << " episodes with bumpers omitted\n";
+
+    std::cout << "PASSED: Bumper actions correctly executed in PlanSegments.\n\n";
+
     std::cout << "[Test 11] Exact keyframe boundaries must not repeat the previous GOP...\n";
     auto long_gop = test_dir / "long_gop.mkv";
     std::string long_gop_cmd = "ffmpeg -y -v error -f lavfi -i testsrc2=duration=12:size=160x90:rate=24 "

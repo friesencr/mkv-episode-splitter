@@ -52,13 +52,16 @@ void PrintUsage(const char* prog) {
               << "  --min-segment <sec>     Min episode segment duration in sec for auto mode (default: 10.0)\n"
               << "  --noise-db <dB>         Audio noise floor threshold in dB for audio gap mode (default: -30)\n"
               << "  --bumpers <action>      Handling for intro/outro bumpers: merge | separate | discard (default: merge)\n"
+              << "  --lead-bumpers <L>      Leading bumper chapters to separate/merge/discard (default: auto or 0)\n"
+              << "  --tail-bumpers <T>      Trailing bumper chapters to separate/merge/discard (default: auto or 0)\n"
               << "  --season <N>            Season number for Plex/Kodi/Jellyfin naming (default: auto-detect or 1)\n"
               << "  --start-episode <N>     Starting episode number for Plex/Kodi/Jellyfin naming (default: auto-detect or 1)\n"
               << "  --info                  Display MKV file details, tracks, and chapters without splitting\n"
               << "  -h, --help              Show this help message\n\n"
               << "Examples:\n"
               << "  " << prog << "                            # Interactive mode with file drag-and-drop\n"
-              << "  " << prog << " -i multi_episode.mkv -m auto -n 2 --bumpers separate\n"
+              << "  " << prog << " -i multi_episode.mkv -m auto --bumpers separate\n"
+              << "  " << prog << " -i multi_episode.mkv -m chapters -g 4 --lead-bumpers 1 --tail-bumpers 1\n"
               << "  " << prog << " -i \"GaoGaiGar - S01E39.mkv\" -m chapters -g 6\n"
               << "  " << prog << " -i video.mkv --info\n";
 }
@@ -125,13 +128,25 @@ int RunInteractiveMode(std::string input_file = "") {
         std::cout << "--------------------------------------------------------\n";
         std::cout << " CONFIGURATION & PREVIEW PLAN (" << plan.size() << " episode segment" << (plan.size() == 1 ? "" : "s") << ")\n";
         std::cout << "--------------------------------------------------------\n";
-        std::cout << " [1] Strategy Mode:     " 
-                  << (config.mode == mkvsplit::SplitMode::Chapters ? ("Chapters (Group every " + std::to_string(config.chapter_group_count) + ")") :
-                     config.mode == mkvsplit::SplitMode::AutoGap ? ("Auto Black-Frame Gap (Expected " + std::to_string(config.gap_config.expected_episodes) + " eps)") :
-                     config.mode == mkvsplit::SplitMode::FixedDuration ? ("Fixed Duration (" + std::to_string(config.chunk_duration_sec) + "s)") : "Time Range") << "\n";
+        std::string mode_desc;
+        if (config.mode == mkvsplit::SplitMode::Chapters) {
+            mode_desc = "Chapters (" + std::to_string(config.chapter_group_count) + " ch/ep";
+            if (config.lead_bumper_chapters > 0 || config.tail_bumper_chapters > 0) {
+                mode_desc += ", Bumpers: lead=" + std::to_string(config.lead_bumper_chapters) + " ch, tail=" + std::to_string(config.tail_bumper_chapters) + " ch";
+            }
+            mode_desc += ")";
+        } else if (config.mode == mkvsplit::SplitMode::AutoGap) {
+            mode_desc = "Auto Black-Frame Gap (Expected " + std::to_string(config.gap_config.expected_episodes) + " eps)";
+        } else if (config.mode == mkvsplit::SplitMode::FixedDuration) {
+            mode_desc = "Fixed Duration (" + std::to_string(config.chunk_duration_sec) + "s)";
+        } else {
+            mode_desc = "Time Range";
+        }
+
+        std::cout << " [1] Strategy Mode:     " << mode_desc << "\n";
         std::cout << " [2] Bumper Handling:   " 
                   << (config.bumper_action == mkvsplit::BumperAction::Merge ? "Merge intro/outro into adjacent episode (Recommended)" :
-                     config.bumper_action == mkvsplit::BumperAction::Separate ? "Export disc intro/outro as separate files (disc_outro.mkv)" : "Discard intro/outro bumpers") << "\n";
+                     config.bumper_action == mkvsplit::BumperAction::Separate ? "Export disc intro/outro as separate files (disc_intro.mkv / disc_outro.mkv)" : "Discard intro/outro bumpers") << "\n";
         std::cout << " [3] Season & Start Ep: Season " << (config.season_number > 0 ? config.season_number : 1) 
                   << ", Start Ep " << (config.start_episode_number > 0 ? config.start_episode_number : 1) << " (Plex/Kodi Format)\n";
         std::cout << " [4] Output Directory:  " << config.output_directory.string() << "\n";
@@ -195,15 +210,27 @@ int RunInteractiveMode(std::string input_file = "") {
         } else if (choice == "2") {
             std::cout << "\nSelect Bumper Handling:\n";
             std::cout << " [1] Merge intro/outro bumpers into adjacent episode (Recommended)\n";
-            std::cout << " [2] Export disc intro/outro as separate files (disc_outro.mkv)\n";
+            std::cout << " [2] Export disc intro/outro as separate files (disc_intro.mkv / disc_outro.mkv)\n";
             std::cout << " [3] Discard intro/outro bumpers entirely\n";
-            std::cout << "Choice (1-3): ";
+            std::cout << " [4] Set lead/tail bumper chapter counts (Current: lead=" << config.lead_bumper_chapters << ", tail=" << config.tail_bumper_chapters << ")\n";
+            std::cout << "Choice (1-4): ";
             std::string bchoice;
             std::getline(std::cin, bchoice);
             bchoice = CleanPath(bchoice);
-            if (bchoice == "2") config.bumper_action = mkvsplit::BumperAction::Separate;
-            else if (bchoice == "3") config.bumper_action = mkvsplit::BumperAction::Discard;
-            else config.bumper_action = mkvsplit::BumperAction::Merge;
+            if (bchoice == "1") {
+                config.bumper_action = mkvsplit::BumperAction::Merge;
+            } else if (bchoice == "2") {
+                config.bumper_action = mkvsplit::BumperAction::Separate;
+            } else if (bchoice == "3") {
+                config.bumper_action = mkvsplit::BumperAction::Discard;
+            } else if (bchoice == "4") {
+                std::cout << "Enter lead bumper chapters (0-3): ";
+                std::string lb; std::getline(std::cin, lb);
+                try { config.lead_bumper_chapters = std::stoi(CleanPath(lb)); } catch (...) {}
+                std::cout << "Enter tail bumper chapters (0-3): ";
+                std::string tb; std::getline(std::cin, tb);
+                try { config.tail_bumper_chapters = std::stoi(CleanPath(tb)); } catch (...) {}
+            }
         } else if (choice == "3") {
             std::cout << "\nEnter Season Number (0 = auto-detect): ";
             std::string sn;
@@ -277,6 +304,8 @@ int main(int argc, char* argv[]) {
     int start_ep_num = 0;
     std::string gap_type_str = "black";
     std::string bumpers_str = "merge";
+    int lead_bumpers = -1;
+    int tail_bumpers = -1;
     double min_gap = 2.0;
     double min_segment = 10.0;
     double noise_db = -30.0;
@@ -321,6 +350,10 @@ int main(int argc, char* argv[]) {
             gap_type_str = argv[++i];
         } else if (arg == "--bumpers" && i + 1 < argc) {
             bumpers_str = argv[++i];
+        } else if (arg == "--lead-bumpers" && i + 1 < argc) {
+            lead_bumpers = std::stoi(argv[++i]);
+        } else if (arg == "--tail-bumpers" && i + 1 < argc) {
+            tail_bumpers = std::stoi(argv[++i]);
         } else if ((arg == "--min-gap" || arg == "--min-silence") && i + 1 < argc) {
             min_gap = std::stod(argv[++i]);
         } else if (arg == "--min-segment" && i + 1 < argc) {
@@ -404,7 +437,21 @@ int main(int argc, char* argv[]) {
     } else if (mode_str == "size") {
         config.mode = mkvsplit::SplitMode::FileSize;
         config.chunk_max_bytes = chunk_size_mb * 1024 * 1024;
-    } else if (mode_str == "auto" || mode_str == "gap") {
+    } else if (mode_str == "auto") {
+        if (guess.recommended_config.mode == mkvsplit::SplitMode::Chapters) {
+            config = guess.recommended_config;
+            config.input_file = input_file;
+            config.output_directory = output_dir;
+            if (season_num > 0) config.season_number = season_num;
+            if (start_ep_num > 0) config.start_episode_number = start_ep_num;
+        } else {
+            config.mode = mkvsplit::SplitMode::AutoGap;
+            config.gap_config.type = mkvsplit::GapType::BlackFrame;
+            config.gap_config.expected_episodes = expected_eps;
+            config.gap_config.min_gap_duration_sec = min_gap;
+            config.gap_config.min_segment_duration_sec = min_segment;
+        }
+    } else if (mode_str == "gap") {
         config.mode = mkvsplit::SplitMode::AutoGap;
         if (gap_type_str == "silence" || gap_type_str == "audio") {
             config.gap_config.type = mkvsplit::GapType::AudioSilence;
@@ -419,7 +466,9 @@ int main(int argc, char* argv[]) {
         config.gap_config.noise_threshold_db = noise_db;
     } else if (mode_str == "chapters") {
         config.mode = mkvsplit::SplitMode::Chapters;
-        config.chapter_group_count = group_chapters;
+        config.chapter_group_count = (group_chapters > 0) ? group_chapters : guess.recommended_config.chapter_group_count;
+        config.lead_bumper_chapters = (lead_bumpers >= 0) ? lead_bumpers : guess.recommended_config.lead_bumper_chapters;
+        config.tail_bumper_chapters = (tail_bumpers >= 0) ? tail_bumpers : guess.recommended_config.tail_bumper_chapters;
         if (!chapters_str.empty()) {
             std::stringstream ss(chapters_str);
             std::string token;
@@ -434,6 +483,9 @@ int main(int argc, char* argv[]) {
         config.range_start_sec = mkvsplit::TimeStringToSeconds(start_str);
         config.range_end_sec = mkvsplit::TimeStringToSeconds(end_str);
     }
+
+    if (lead_bumpers >= 0) config.lead_bumper_chapters = lead_bumpers;
+    if (tail_bumpers >= 0) config.tail_bumper_chapters = tail_bumpers;
 
     std::vector<mkvsplit::SplitSegment> plan = mkvsplit::MKVSplitter::PlanSegments(meta, config);
     std::cout << "\nSplit Execution Plan (" << plan.size() << " segment" << (plan.size() == 1 ? "" : "s") << "):\n";
