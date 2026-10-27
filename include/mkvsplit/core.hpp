@@ -29,6 +29,8 @@ struct GapDetectionConfig {
     double noise_threshold_db = -30.0;     // Noise floor in dB for audio silence
     double min_gap_duration_sec = 2.0;     // Minimum duration of black screen gap between episodes (default 2.0s)
     double min_segment_duration_sec = 10.0;// Minimum episode segment duration
+    std::vector<double> scan_targets_sec; // Optional black-frame scan centers, e.g. chapter boundaries
+    double scan_radius_sec = 3.0;         // Scan this far on each side of explicit targets
 };
 
 struct ChapterInfo {
@@ -86,6 +88,7 @@ struct SplitConfig {
     uint64_t chunk_max_bytes = 500 * 1024 * 1024; // Default 500 MB
     std::vector<int> selected_chapter_ids;
     int chapter_group_count = 0; // If > 0, group K chapters into 1 episode segment (e.g. 5 chapters per episode)
+    std::vector<int> chapter_group_sizes; // Variable chapters per episode; used when chapter_group_count is 0
     int lead_bumper_chapters = 0; // Number of leading chapters identified as bumpers (e.g. studio logo)
     int tail_bumper_chapters = 0; // Number of trailing chapters identified as bumpers (e.g. disc outro/copyright)
     int season_number = 0;        // Season number (0 = auto-detect or default S01)
@@ -110,15 +113,26 @@ struct AutoGuessResult {
     std::string reasoning;
 };
 
+struct ChapterBoundaryValidation {
+    std::vector<double> boundaries_sec;
+    std::vector<bool> supported_by_black;
+    std::string error;
+};
+
 class MKVSplitter {
 public:
     // Inspect MKV file to retrieve metadata, track list, chapters, and keyframes
     static MKVMetadata InspectFile(const std::filesystem::path& path, std::string* error_msg = nullptr);
 
     // Automatically analyze metadata to guess the optimal splitting strategy
-    static AutoGuessResult GuessSplitConfig(const MKVMetadata& metadata);
+    // Metadata-only by default; pass true to corroborate with targeted video scans.
+    static AutoGuessResult GuessSplitConfig(const MKVMetadata& metadata, bool validate_video = false);
 
-    // Detect audio silence gaps in MKV file using FFmpeg filter
+    // Check for black transitions within three seconds of proposed episode starts.
+    // This supplies evidence without moving chapter cuts or changing episode count.
+    static ChapterBoundaryValidation ValidateChapterBoundaries(const MKVMetadata& metadata, const SplitConfig& config);
+
+    // Detect black-frame, audio-silence, or combined gaps according to gap_config
     static std::vector<double> DetectGaps(const std::filesystem::path& path, const GapDetectionConfig& gap_config = {}, std::string* error_msg = nullptr);
 
     // Calculate segment plan without writing files

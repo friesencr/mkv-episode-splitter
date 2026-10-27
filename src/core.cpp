@@ -7,8 +7,29 @@
 #include <algorithm>
 #include <cmath>
 #include <regex>
+#include <numeric>
 
 namespace mkvsplit {
+
+static int EpisodeCountFromFilename(const std::string& filename) {
+    // Only trust an explicit consecutive list, e.g. E01E02 or S02E03-E04.
+    static const std::regex list_regex(
+        R"((^|[ ._-])(?:S[0-9]{1,6}[ ._-]*)?(EP?[0-9]{1,6}(?:[ ._-]*EP?[0-9]{1,6})+)(?![A-Za-z0-9]))",
+        std::regex::icase);
+    static const std::regex episode_regex(R"(EP?([0-9]{1,6}))", std::regex::icase);
+    std::smatch match;
+    if (!std::regex_search(filename, match, list_regex)) return 0;
+    std::string list = match[2].str();
+    int count = 0;
+    int previous = -1;
+    for (std::sregex_iterator it(list.begin(), list.end(), episode_regex), end; it != end; ++it) {
+        int episode = std::stoi((*it)[1].str());
+        if (count > 0 && episode != previous + 1) return 0;
+        previous = episode;
+        ++count;
+    }
+    return count;
+}
 
 static bool ParseSeasonEpisodeFromFilename(const std::string& filename, int& season, int& start_ep, std::string& show_name) {
     std::regex se_regex("(.*?)[ ._-]*[Ss](\\d+)[ ._-]*[Ee](\\d+)", std::regex::icase);
@@ -41,13 +62,196 @@ MKVMetadata MKVSplitter::InspectFile(const std::filesystem::path& path, std::str
     return meta;
 }
 
-AutoGuessResult MKVSplitter::GuessSplitConfig(const MKVMetadata& metadata) {
+static bool GuessPreviewChapterGroups(const std::vector<double>& durations, int expected_episodes,
+                                     AutoGuessResult& result) {
+    // Some discs chapter credits, next-episode previews, and a brief separator
+    // individually. That repeated ending is stronger evidence than a fixed
+    // chapter count, especially when a separator is missing or a finale is long.
+    std::vector<int> groups;
+    std::vector<double> runtimes, credits, previews;
+    size_t start = 0;
+    for (size_t i = 1; i + 1 < durations.size(); ++i) {
+        double credit = durations[i], preview = durations[i + 1];
+        if (i - start + 1 < 3 || credit < 60.0 || credit > 300.0 ||
+            preview < 10.0 || preview > 60.0 || preview > credit * 0.6 ||
+            durations[i - 1] < std::max(300.0, credit * 2.0)) continue;
+        size_t end = i + 2;
+        if (end < durations.size() && durations[end] <= 10.0) ++end;
+        double runtime = std::accumulate(durations.begin() + start, durations.begin() + end, 0.0);
+        if (runtime < 600.0 || runtime > 7200.0) return false;
+        groups.push_back(static_cast<int>(end - start));
+        runtimes.push_back(runtime);
+        credits.push_back(credit);
+        previews.push_back(preview);
+        start = end;
+        i = end - 1;
+    }
+    if (groups.size() < 3) return false;
+    auto consistent = [](const std::vector<double>& values) {
+        double mean = std::accumulate(values.begin(), values.end(), 0.0) / values.size();
+        double variance = 0.0;
+        for (double value : values) variance += (value - mean) * (value - mean);
+        return std::sqrt(variance / values.size()) / mean <= 0.20;
+    };
+    if (!consistent(credits) || !consistent(previews)) return false;
+    auto sorted_runtimes = runtimes;
+    std::sort(sorted_runtimes.begin(), sorted_runtimes.end());
+    double typical_runtime = sorted_runtimes[sorted_runtimes.size() / 2];
+    for (double runtime : runtimes) {
+        if (std::abs(runtime - typical_runtime) > typical_runtime * 0.25) return false;
+    }
+
+    int tail = 0;
+    bool longer_finale = false;
+    if (start < durations.size()) {
+        double remaining = std::accumulate(durations.begin() + start, durations.end(), 0.0);
+        if (durations.size() - start <= 2 && remaining <= std::min(300.0, typical_runtime * 0.2)) {
+            tail = static_cast<int>(durations.size() - start);
+        } else {
+            // Final episodes often omit a preview and may occupy a double slot.
+            // Require substantial story content, not just trailing bonus chapters.
+            int story_chapters = static_cast<int>(std::count_if(durations.begin() + start, durations.end(),
+                [](double duration) { return duration >= 300.0; }));
+            if (durations.size() - start < 3 || story_chapters < 2 ||
+                remaining < typical_runtime * 0.65 || remaining > typical_runtime * 2.25) return false;
+            groups.push_back(static_cast<int>(durations.size() - start));
+            longer_finale = remaining > typical_runtime * 1.25;
+        }
+    }
+    if (expected_episodes > 1 && groups.size() != static_cast<size_t>(expected_episodes)) return false;
+    result.recommended_config.mode = SplitMode::Chapters;
+    result.recommended_config.chapter_group_sizes = groups;
+    result.recommended_config.tail_bumper_chapters = tail;
+    result.confidence_percent = 90;
+    std::ostringstream reasoning;
+    reasoning << "Repeated credits/preview chapter pattern suggests " << groups.size() << " episodes (";
+    for (size_t i = 0; i < groups.size(); ++i) {
+        if (i > 0) reasoning << ", ";
+        reasoning << groups[i];
+    }
+    reasoning << " chapters per episode; typical runtime ~" << FormatDuration(typical_runtime) << ")";
+    if (longer_finale) reasoning << ", including a longer final episode";
+    if (tail > 0) reasoning << " + " << tail << " trailing extra chapter(s)";
+    reasoning << ".";
+    result.reasoning = reasoning.str();
+    return true;
+}
+
+static bool GuessVariableChapterGroups(const std::vector<double>& durations, int expected_episodes,
+                                      AutoGuessResult& result) {
+    if (durations.size() < 9) return false;
+    auto sorted = durations;
+    std::sort(sorted.begin(), sorted.end());
+    // A short closing chapter following story chapters can mark credits even when
+    // different episodes have different numbers of acts. Require repeated timing
+    // agreement before preferring these boundaries over fixed chapter symmetry.
+    double short_limit = std::min(300.0, sorted[sorted.size() / 2] * 0.5);
+    std::vector<int> groups;
+    std::vector<double> episode_durations;
+    size_t start = 0;
+    double duration = 0.0;
+    for (size_t i = 0; i < durations.size(); ++i) {
+        duration += durations[i];
+        if (i > start && i - start + 1 >= 3 && durations[i] <= short_limit &&
+            durations[i - 1] > short_limit) {
+            if (duration < 600.0 || duration > 7200.0) return false;
+            groups.push_back(static_cast<int>(i - start + 1));
+            episode_durations.push_back(duration);
+            start = i + 1;
+            duration = 0.0;
+        }
+    }
+    if (groups.size() < 3 || (expected_episodes > 1 && groups.size() != static_cast<size_t>(expected_episodes))) return false;
+    auto [min_group, max_group] = std::minmax_element(groups.begin(), groups.end());
+    if (*min_group == *max_group || *max_group > 2 * *min_group) return false;
+    double average = std::accumulate(episode_durations.begin(), episode_durations.end(), 0.0) / groups.size();
+    // Keep a small trailing extra separate in the plan; the bumper policy decides
+    // whether it is merged, exported separately, or discarded.
+    if (durations.size() - start > 2 || duration > std::min(600.0, average * 0.2)) return false;
+    double variance = 0.0;
+    for (double episode : episode_durations) {
+        if (std::abs(episode - average) > average * 0.15) return false;
+        variance += (episode - average) * (episode - average);
+    }
+    double cv = std::sqrt(variance / groups.size()) / average;
+    if (cv > 0.08) return false;
+
+    result.recommended_config.mode = SplitMode::Chapters;
+    result.recommended_config.chapter_group_sizes = groups;
+    result.recommended_config.tail_bumper_chapters = static_cast<int>(durations.size() - start);
+    result.confidence_percent = static_cast<int>(95.0 - cv * 50.0);
+    std::ostringstream reasoning;
+    reasoning << "Repeated short closing chapters suggest " << groups.size() << " episodes (~"
+              << FormatDuration(average) << " each), with ";
+    for (size_t i = 0; i < groups.size(); ++i) {
+        if (i > 0) reasoning << ", ";
+        reasoning << groups[i];
+    }
+    reasoning << " chapters per episode";
+    if (start < durations.size()) reasoning << " + " << durations.size() - start << " trailing extra chapter(s)";
+    reasoning << ".";
+    result.reasoning = reasoning.str();
+    return true;
+}
+
+ChapterBoundaryValidation MKVSplitter::ValidateChapterBoundaries(const MKVMetadata& metadata, const SplitConfig& config) {
+    ChapterBoundaryValidation validation;
+    if (config.mode != SplitMode::Chapters) return validation;
+    auto plan = PlanSegments(metadata, config);
+    bool first_episode = true;
+    for (const auto& segment : plan) {
+        if (segment.name_tag == "disc_intro" || segment.name_tag == "disc_outro") continue;
+        if (!first_episode) validation.boundaries_sec.push_back(segment.start_time_sec);
+        first_episode = false;
+    }
+    if (validation.boundaries_sec.empty()) return validation;
+    GapDetectionConfig gaps;
+    gaps.type = GapType::BlackFrame;
+    gaps.min_gap_duration_sec = 0.25;
+    gaps.scan_targets_sec = validation.boundaries_sec;
+    auto black_gaps = DetectGaps(metadata.file_path, gaps, &validation.error);
+    if (!validation.error.empty()) return validation;
+    for (double boundary : validation.boundaries_sec) {
+        validation.supported_by_black.push_back(std::any_of(black_gaps.begin(), black_gaps.end(), [&](double gap) {
+            return std::abs(gap - boundary) <= gaps.scan_radius_sec;
+        }));
+    }
+    return validation;
+}
+
+AutoGuessResult MKVSplitter::GuessSplitConfig(const MKVMetadata& metadata, bool validate_video) {
+    if (validate_video) {
+        auto result = GuessSplitConfig(metadata, false);
+        auto validation = ValidateChapterBoundaries(metadata, result.recommended_config);
+        if (!validation.boundaries_sec.empty()) {
+            if (!validation.error.empty()) {
+                result.reasoning += " Black-frame validation unavailable: " + validation.error + ".";
+            } else {
+                int supported = static_cast<int>(std::count(validation.supported_by_black.begin(), validation.supported_by_black.end(), true));
+                int total = static_cast<int>(validation.boundaries_sec.size());
+                result.reasoning += " Black-frame check: " + std::to_string(supported) + "/" +
+                    std::to_string(total) + " episode boundaries supported by a black transition within 3s.";
+                // Missing black frames are weaker evidence, not a reason to merge episodes.
+                result.confidence_percent = std::clamp(result.confidence_percent +
+                    (supported == total ? 5 : -static_cast<int>(std::ceil(10.0 * (total - supported) / total))), 0, 98);
+                if (supported < total) {
+                    result.reasoning += " Unconfirmed chapter cuts retained:";
+                    for (size_t i = 0; i < validation.boundaries_sec.size(); ++i) {
+                        if (!validation.supported_by_black[i]) result.reasoning += " " + SecondsToTimeString(validation.boundaries_sec[i]);
+                    }
+                    result.reasoning += ". Review these in the preview.";
+                }
+            }
+        }
+        return result;
+    }
     AutoGuessResult result;
     result.recommended_config.input_file = metadata.file_path;
     result.recommended_config.output_directory = metadata.file_path.parent_path() / "output";
 
     double total_duration = metadata.duration_sec;
     size_t num_ch = metadata.chapters.size();
+    int filename_episodes = EpisodeCountFromFilename(metadata.file_path.stem().string());
 
     if (num_ch > 0) {
         std::vector<double> ch_durations;
@@ -62,6 +266,9 @@ AutoGuessResult MKVSplitter::GuessSplitConfig(const MKVMetadata& metadata) {
             }
             ch_durations.push_back(std::max(0.1, d));
         }
+
+        if (GuessPreviewChapterGroups(ch_durations, filename_episodes, result)) return result;
+        if (GuessVariableChapterGroups(ch_durations, filename_episodes, result)) return result;
 
         // Combinatorial brute-force search over lead/tail bumpers and chapter divisions
         int best_k = -1;
@@ -97,6 +304,7 @@ AutoGuessResult MKVSplitter::GuessSplitConfig(const MKVMetadata& metadata) {
                 for (int k = 1; k <= max_k; k++) {
                     int num_groups = m / k;
                     if (num_groups < 1) continue;
+                    if (filename_episodes > 1 && (num_groups != filename_episodes || m % k != 0)) continue;
                     
                     // If num_groups == 1 and num_ch > 1, this is not a multi-episode split
                     if (num_groups == 1 && num_ch > 1) continue;
@@ -246,7 +454,7 @@ AutoGuessResult MKVSplitter::GuessSplitConfig(const MKVMetadata& metadata) {
         int est_eps = std::max(1, static_cast<int>(std::round(total_duration / 1440.0))); // ~24 mins per episode
         int k = std::max(1, static_cast<int>(std::round(static_cast<double>(num_ch) / est_eps)));
 
-        if (k >= 2 && k <= 10) {
+        if (filename_episodes == 0 && k >= 2 && k <= 10) {
             result.recommended_config.mode = SplitMode::Chapters;
             result.recommended_config.chapter_group_count = k;
             result.confidence_percent = 90;
@@ -259,7 +467,8 @@ AutoGuessResult MKVSplitter::GuessSplitConfig(const MKVMetadata& metadata) {
     }
 
     // Fallback: Auto Gap detection with guessed episode count
-    int est_eps = std::max(1, static_cast<int>(std::round(total_duration / 1440.0)));
+    int est_eps = filename_episodes > 1 ? filename_episodes :
+        std::max(1, static_cast<int>(std::round(total_duration / 1440.0)));
     result.recommended_config.mode = SplitMode::AutoGap;
     result.recommended_config.gap_config.type = GapType::BlackFrame;
     result.recommended_config.gap_config.expected_episodes = est_eps;
@@ -268,11 +477,15 @@ AutoGuessResult MKVSplitter::GuessSplitConfig(const MKVMetadata& metadata) {
     result.confidence_percent = 80;
     result.reasoning = "Guessed " + std::to_string(est_eps) + " episodes based on total duration of " +
                        FormatDuration(total_duration) + ". Uses black frame gap detection around expected episode boundaries.";
+    if (filename_episodes > 1) {
+        result.reasoning = "Filename lists " + std::to_string(filename_episodes) +
+            " consecutive episodes. Uses black frame gap detection around expected episode boundaries.";
+    }
     return result;
 }
 
 std::vector<double> MKVSplitter::DetectGaps(const std::filesystem::path& path, const GapDetectionConfig& gap_config, std::string* error_msg) {
-    return FFmpegDemuxer::DetectSilenceGaps(path, gap_config, error_msg);
+    return FFmpegDemuxer::DetectGaps(path, gap_config, error_msg);
 }
 
 std::vector<SplitSegment> MKVSplitter::PlanSegments(const MKVMetadata& metadata, const SplitConfig& config) {
@@ -360,12 +573,20 @@ std::vector<SplitSegment> MKVSplitter::PlanSegments(const MKVMetadata& metadata,
                 seg.end_time_sec = file_duration;
                 seg.name_tag = "full";
                 segments.push_back(seg);
-            } else if (config.chapter_group_count > 0) {
-                int group_size = config.chapter_group_count;
+            } else if (config.chapter_group_count > 0 || !config.chapter_group_sizes.empty()) {
                 int total_ch = static_cast<int>(metadata.chapters.size());
                 int lead = std::clamp(config.lead_bumper_chapters, 0, std::max(0, total_ch - 1));
                 int tail = std::clamp(config.tail_bumper_chapters, 0, std::max(0, total_ch - lead - 1));
                 int content_ch = total_ch - lead - tail;
+                std::vector<int> group_sizes = config.chapter_group_sizes;
+                if (config.chapter_group_count > 0) {
+                    group_sizes.assign(content_ch / config.chapter_group_count, config.chapter_group_count);
+                }
+                int grouped_ch = 0;
+                for (int size : group_sizes) {
+                    if (size <= 0 || size > content_ch - grouped_ch) return {};
+                    grouped_ch += size;
+                }
                 int ep_idx = 0;
                 double min_seg = (config.gap_config.min_segment_duration_sec > 10.0) ? config.gap_config.min_segment_duration_sec : 120.0;
 
@@ -383,10 +604,10 @@ std::vector<SplitSegment> MKVSplitter::PlanSegments(const MKVMetadata& metadata,
                 }
 
                 // 2. Main episode segments
-                int num_episodes = (group_size > 0) ? (content_ch / group_size) : 0;
+                int num_episodes = static_cast<int>(group_sizes.size());
+                int start_ch_idx = lead;
                 for (int e = 0; e < num_episodes; e++) {
-                    int start_ch_idx = lead + e * group_size;
-                    int end_ch_idx = start_ch_idx + group_size - 1;
+                    int end_ch_idx = start_ch_idx + group_sizes[e] - 1;
 
                     double start_t = metadata.chapters[start_ch_idx].start_time_sec;
                     double end_t = metadata.chapters[end_ch_idx].end_time_sec;
@@ -410,6 +631,7 @@ std::vector<SplitSegment> MKVSplitter::PlanSegments(const MKVMetadata& metadata,
                     seg.end_time_sec = end_t;
                     seg.name_tag = FormatSE(ep_idx++);
                     segments.push_back(seg);
+                    start_ch_idx = end_ch_idx + 1;
                 }
 
                 // 3. Tail bumper / unmapped trailing fragment handling
@@ -423,9 +645,9 @@ std::vector<SplitSegment> MKVSplitter::PlanSegments(const MKVMetadata& metadata,
                         bseg.name_tag = "disc_outro";
                         segments.push_back(bseg);
                     }
-                } else if (content_ch % group_size != 0) {
+                } else if (grouped_ch < content_ch) {
                     // Leftover chapters at the end when tail was 0
-                    int rem_start_ch = lead + num_episodes * group_size;
+                    int rem_start_ch = lead + grouped_ch;
                     double rem_start = metadata.chapters[rem_start_ch].start_time_sec;
                     double rem_end = file_duration;
                     if (config.bumper_action == BumperAction::Merge && !segments.empty()) {
@@ -512,7 +734,8 @@ std::vector<SplitSegment> MKVSplitter::PlanSegments(const MKVMetadata& metadata,
     }
 
     // Bumper Post-Processing (Intros & Outros)
-    if (!segments.empty() && (config.mode == SplitMode::AutoGap || (config.mode == SplitMode::Chapters && config.chapter_group_count > 0))) {
+    if (!segments.empty() && (config.mode == SplitMode::AutoGap || (config.mode == SplitMode::Chapters &&
+        (config.chapter_group_count > 0 || !config.chapter_group_sizes.empty())))) {
         double min_seg = (config.gap_config.min_segment_duration_sec > 10.0) ? config.gap_config.min_segment_duration_sec : 300.0;
 
         // Leading Intro Bumper

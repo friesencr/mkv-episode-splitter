@@ -66,6 +66,20 @@ void PrintUsage(const char* prog) {
               << "  " << prog << " -i video.mkv --info\n";
 }
 
+static void PrintEpisodeCountMismatch(const mkvsplit::SplitConfig& config,
+                                      const std::vector<mkvsplit::SplitSegment>& plan) {
+    if (config.mode != mkvsplit::SplitMode::AutoGap || config.gap_config.expected_episodes <= 1) return;
+    size_t episodes = 0;
+    for (const auto& segment : plan) {
+        if (segment.name_tag != "disc_intro" && segment.name_tag != "disc_outro") ++episodes;
+    }
+    if (episodes != static_cast<size_t>(config.gap_config.expected_episodes)) {
+        std::cout << " Could identify " << episodes << " episode segment(s), but expected "
+                  << config.gap_config.expected_episodes
+                  << ". Check the source file and gap settings before splitting.\n";
+    }
+}
+
 int RunInteractiveMode(std::string input_file = "") {
     std::cout << "========================================================\n";
     std::cout << "  MKV SPLITTER — Interactive Mode\n";
@@ -91,7 +105,8 @@ int RunInteractiveMode(std::string input_file = "") {
         return 1;
     }
 
-    mkvsplit::AutoGuessResult guess = mkvsplit::MKVSplitter::GuessSplitConfig(meta);
+    std::cout << "Analyzing chapters and checking nearby black transitions...\n" << std::flush;
+    mkvsplit::AutoGuessResult guess = mkvsplit::MKVSplitter::GuessSplitConfig(meta, true);
 
     std::cout << "\n========================================================\n";
     std::cout << " FILE METADATA SUMMARY\n";
@@ -127,10 +142,19 @@ int RunInteractiveMode(std::string input_file = "") {
 
         std::cout << "--------------------------------------------------------\n";
         std::cout << " CONFIGURATION & PREVIEW PLAN (" << plan.size() << " episode segment" << (plan.size() == 1 ? "" : "s") << ")\n";
+        PrintEpisodeCountMismatch(config, plan);
         std::cout << "--------------------------------------------------------\n";
         std::string mode_desc;
         if (config.mode == mkvsplit::SplitMode::Chapters) {
             mode_desc = "Chapters (" + std::to_string(config.chapter_group_count) + " ch/ep";
+            if (config.chapter_group_count == 0 && !config.chapter_group_sizes.empty()) {
+                mode_desc = "Chapters (variable grouping: ";
+                for (size_t i = 0; i < config.chapter_group_sizes.size(); ++i) {
+                    if (i > 0) mode_desc += ", ";
+                    mode_desc += std::to_string(config.chapter_group_sizes[i]);
+                }
+                mode_desc += " ch/ep";
+            }
             if (config.lead_bumper_chapters > 0 || config.tail_bumper_chapters > 0) {
                 mode_desc += ", Bumpers: lead=" + std::to_string(config.lead_bumper_chapters) + " ch, tail=" + std::to_string(config.tail_bumper_chapters) + " ch";
             }
@@ -164,7 +188,7 @@ int RunInteractiveMode(std::string input_file = "") {
         std::cout << " Press [ENTER] to start split, or type option # (1-4) to adjust settings: ";
 
         std::string choice;
-        if (!std::getline(std::cin, choice)) break;
+        if (!std::getline(std::cin, choice)) return 0;
         choice = CleanPath(choice);
 
         if (choice.empty()) {
@@ -190,6 +214,7 @@ int RunInteractiveMode(std::string input_file = "") {
                 std::string cg;
                 std::getline(std::cin, cg);
                 try { config.chapter_group_count = std::stoi(CleanPath(cg)); } catch (...) {}
+                config.chapter_group_sizes.clear();
             } else if (smode == "3") {
                 config.mode = mkvsplit::SplitMode::AutoGap;
                 config.gap_config.type = mkvsplit::GapType::BlackFrame;
@@ -408,7 +433,8 @@ int main(int argc, char* argv[]) {
     }
     std::cout << " Keyframes: " << meta.keyframes_sec.size() << " detected\n";
     
-    mkvsplit::AutoGuessResult guess = mkvsplit::MKVSplitter::GuessSplitConfig(meta);
+    std::cout << "Analyzing chapters and checking nearby black transitions...\n" << std::flush;
+    mkvsplit::AutoGuessResult guess = mkvsplit::MKVSplitter::GuessSplitConfig(meta, true);
     std::cout << " Auto-Guess Strategy (" << guess.confidence_percent << "% Confidence):\n";
     std::cout << "   " << guess.reasoning << "\n";
     std::cout << "========================================================\n";
@@ -422,14 +448,6 @@ int main(int argc, char* argv[]) {
     config.output_directory = output_dir;
     config.season_number = season_num;
     config.start_episode_number = start_ep_num;
-
-    if (bumpers_str == "separate" || bumpers_str == "dump") {
-        config.bumper_action = mkvsplit::BumperAction::Separate;
-    } else if (bumpers_str == "discard" || bumpers_str == "omit" || bumpers_str == "skip") {
-        config.bumper_action = mkvsplit::BumperAction::Discard;
-    } else {
-        config.bumper_action = mkvsplit::BumperAction::Merge;
-    }
 
     if (mode_str == "duration") {
         config.mode = mkvsplit::SplitMode::FixedDuration;
@@ -447,7 +465,8 @@ int main(int argc, char* argv[]) {
         } else {
             config.mode = mkvsplit::SplitMode::AutoGap;
             config.gap_config.type = mkvsplit::GapType::BlackFrame;
-            config.gap_config.expected_episodes = expected_eps;
+            config.gap_config.expected_episodes = expected_eps > 0 ? expected_eps :
+                guess.recommended_config.gap_config.expected_episodes;
             config.gap_config.min_gap_duration_sec = min_gap;
             config.gap_config.min_segment_duration_sec = min_segment;
         }
@@ -467,6 +486,7 @@ int main(int argc, char* argv[]) {
     } else if (mode_str == "chapters") {
         config.mode = mkvsplit::SplitMode::Chapters;
         config.chapter_group_count = (group_chapters > 0) ? group_chapters : guess.recommended_config.chapter_group_count;
+        if (group_chapters <= 0 && chapters_str.empty()) config.chapter_group_sizes = guess.recommended_config.chapter_group_sizes;
         config.lead_bumper_chapters = (lead_bumpers >= 0) ? lead_bumpers : guess.recommended_config.lead_bumper_chapters;
         config.tail_bumper_chapters = (tail_bumpers >= 0) ? tail_bumpers : guess.recommended_config.tail_bumper_chapters;
         if (!chapters_str.empty()) {
@@ -484,11 +504,20 @@ int main(int argc, char* argv[]) {
         config.range_end_sec = mkvsplit::TimeStringToSeconds(end_str);
     }
 
+    if (bumpers_str == "separate" || bumpers_str == "dump") {
+        config.bumper_action = mkvsplit::BumperAction::Separate;
+    } else if (bumpers_str == "discard" || bumpers_str == "omit" || bumpers_str == "skip") {
+        config.bumper_action = mkvsplit::BumperAction::Discard;
+    } else {
+        config.bumper_action = mkvsplit::BumperAction::Merge;
+    }
+
     if (lead_bumpers >= 0) config.lead_bumper_chapters = lead_bumpers;
     if (tail_bumpers >= 0) config.tail_bumper_chapters = tail_bumpers;
 
     std::vector<mkvsplit::SplitSegment> plan = mkvsplit::MKVSplitter::PlanSegments(meta, config);
     std::cout << "\nSplit Execution Plan (" << plan.size() << " segment" << (plan.size() == 1 ? "" : "s") << "):\n";
+    PrintEpisodeCountMismatch(config, plan);
     for (size_t i = 0; i < plan.size(); i++) {
         std::cout << " [" << (i + 1) << "/" << plan.size() << "] Tag: " << plan[i].name_tag
                   << " | Range: " << mkvsplit::SecondsToTimeString(plan[i].start_time_sec)

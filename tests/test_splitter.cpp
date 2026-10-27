@@ -4,6 +4,7 @@
 #include <cassert>
 #include <cstdlib>
 #include <filesystem>
+#include <cmath>
 
 int main() {
     std::cout << "========================================================\n";
@@ -123,6 +124,8 @@ int main() {
     std::vector<double> black_gaps = mkvsplit::MKVSplitter::DetectGaps(black_gap_mkv, bgcfg, &err);
     assert(err.empty());
     assert(!black_gaps.empty());
+    assert(black_gaps.size() == 1);
+    assert(black_gaps[0] > 4.0 && black_gaps[0] < 5.0);
     std::cout << "  - Black frame episode gap detected at: " << black_gaps[0] << " s\n";
     std::cout << "PASSED: Black frame episode gap detection verified.\n\n";
 
@@ -318,6 +321,275 @@ int main() {
     auto exact_meta = mkvsplit::MKVSplitter::InspectFile(exact_cfg.output_directory / "split_long_gop_part1.mkv");
     assert(exact_meta.duration_sec >= 4.9 && exact_meta.duration_sec < 5.2);
     std::cout << "PASSED: Exact boundary starts at the requested keyframe.\n\n";
+
+    std::cout << "[Test 12] Filename episode lists take precedence over duration estimates...\n";
+    mkvsplit::MKVMetadata named_meta;
+    named_meta.duration_sec = 6 * 3000.0; // Long episodes must not be guessed as 24-minute episodes.
+    for (const auto& name : {"Crying Freeman e01e02e03e04e05e06.mkv",
+                             "Show.S02E07E08E09E10E11E12.mkv",
+                             "Show ep01-ep02-ep03-ep04-ep05-ep06.mkv"}) {
+        named_meta.file_path = name;
+        auto named_guess = mkvsplit::MKVSplitter::GuessSplitConfig(named_meta);
+        assert(named_guess.recommended_config.mode == mkvsplit::SplitMode::AutoGap);
+        assert(named_guess.recommended_config.gap_config.expected_episodes == 6);
+    }
+    for (const auto& name : {"Show e01.mkv", "Show e01e03.mkv", "Show e01e01.mkv", "Movie01e02.mkv"}) {
+        named_meta.file_path = name;
+        assert(mkvsplit::MKVSplitter::GuessSplitConfig(named_meta).recommended_config.gap_config.expected_episodes == 13);
+    }
+    auto named_chapters = single_ch_meta;
+    named_chapters.file_path = "Show S02E07E08E09E10E11E12.mkv";
+    auto named_plan = mkvsplit::MKVSplitter::PlanSegments(named_chapters,
+        mkvsplit::MKVSplitter::GuessSplitConfig(named_chapters).recommended_config);
+    assert(named_plan.size() == 6);
+    assert(named_plan.front().name_tag == "S02E07" && named_plan.back().name_tag == "S02E12");
+    named_meta.file_path = "Crying Freeman e01e02e03e04e05e06.mkv";
+    named_meta.duration_sec = 0.0;
+    assert(mkvsplit::MKVSplitter::GuessSplitConfig(named_meta).recommended_config.gap_config.expected_episodes == 6);
+    std::cout << "PASSED: Explicit consecutive episode lists recognized.\n\n";
+
+    std::cout << "[Test 13] Six-episode video without chapters, duration metadata, or audio...\n";
+    auto unfinalized_mkv = test_dir / "Crying Freeman e01e02e03e04e05e06.mkv";
+    std::string unfinalized_cmd = "ffmpeg -y -v error -f lavfi -i color=white:s=160x90:r=10:d=36 "
+        "-vf \"drawbox=c=black:t=fill:enable='gte(mod(t,6),4)*lt(t,30)'\" "
+        "-c:v libx264 -g 10 -live 1 \"" + unfinalized_mkv.string() + "\"";
+    int unfinalized_ret = std::system(unfinalized_cmd.c_str());
+    assert(unfinalized_ret == 0);
+    err.clear();
+    auto unfinalized_meta = mkvsplit::MKVSplitter::InspectFile(unfinalized_mkv, &err);
+    assert(err.empty());
+    assert(unfinalized_meta.chapters.empty());
+    assert(unfinalized_meta.tracks.size() == 1);
+    assert(std::abs(unfinalized_meta.duration_sec - 36.0) < 0.2);
+    auto six_config = mkvsplit::MKVSplitter::GuessSplitConfig(unfinalized_meta).recommended_config;
+    assert(six_config.gap_config.expected_episodes == 6);
+    six_config.gap_config.min_segment_duration_sec = 1.0;
+    auto six_plan = mkvsplit::MKVSplitter::PlanSegments(unfinalized_meta, six_config);
+    assert(six_plan.size() == 6);
+    assert(six_plan.front().start_time_sec == 0.0);
+    assert(six_plan.back().end_time_sec == unfinalized_meta.duration_sec);
+    for (size_t i = 0; i < 5; ++i) {
+        assert(std::abs(six_plan[i].end_time_sec - (5.0 + 6.0 * i)) < 0.2);
+        assert(six_plan[i].end_time_sec == six_plan[i + 1].start_time_sec);
+    }
+    assert(six_plan.back().name_tag == "S01E06");
+    std::cout << "PASSED: Missing duration recovered and six episodes planned using black gaps.\n\n";
+
+    std::cout << "[Test 14] Variable chapter counts must not merge pairs of episodes...\n";
+    // Chapter endpoints from the 35-chapter Crying Freeman disc. No episode
+    // numbers or descriptive titles are available to guide the classifier.
+    const double chapter_ends[] = {
+        47.297250, 810.559750, 1537.619417, 2430.010917, 3017.973292, 3120.826042,
+        3272.936333, 3791.662875, 4373.577542, 5201.863333, 6041.285250, 6158.861042,
+        6794.829708, 7263.005750, 8059.634917, 9076.609208, 9228.052167,
+        9590.289042, 10376.282583, 11232.429542, 12070.975583, 12267.046458,
+        12355.468125, 12973.835875, 13649.761125, 14369.438417, 15041.443083, 15291.276000,
+        15572.473583, 16081.315250, 16777.010250, 17526.383875, 18066.757042, 18314.296000,
+        18661.664000
+    };
+    mkvsplit::MKVMetadata variable_meta;
+    variable_meta.file_path = "Crying Freeman.mkv";
+    double previous_end = 0.0;
+    for (double end : chapter_ends) {
+        mkvsplit::ChapterInfo chapter;
+        chapter.id = static_cast<int>(variable_meta.chapters.size());
+        chapter.start_time_sec = previous_end;
+        chapter.end_time_sec = end;
+        variable_meta.chapters.push_back(chapter);
+        previous_end = end;
+    }
+    variable_meta.duration_sec = previous_end;
+    auto variable_guess = mkvsplit::MKVSplitter::GuessSplitConfig(variable_meta);
+    auto variable_config = variable_guess.recommended_config;
+    assert(variable_config.mode == mkvsplit::SplitMode::Chapters);
+    assert(variable_config.chapter_group_count == 0);
+    assert((variable_config.chapter_group_sizes == std::vector<int>{6, 6, 5, 5, 6, 6}));
+    assert(variable_config.tail_bumper_chapters == 1);
+    const double expected_starts[] = {0.0, 3120.826042, 6158.861042, 9228.052167, 12267.046458, 15291.276000};
+    for (auto action : {mkvsplit::BumperAction::Merge, mkvsplit::BumperAction::Separate, mkvsplit::BumperAction::Discard}) {
+        variable_config.bumper_action = action;
+        auto variable_plan = mkvsplit::MKVSplitter::PlanSegments(variable_meta, variable_config);
+        assert(variable_plan.size() == (action == mkvsplit::BumperAction::Separate ? 7 : 6));
+        for (size_t i = 0; i < 6; ++i) {
+            assert(std::abs(variable_plan[i].start_time_sec - expected_starts[i]) < 0.001);
+            assert(variable_plan[i].name_tag == "S01E0" + std::to_string(i + 1));
+            if (i < 5) assert(variable_plan[i].end_time_sec == variable_plan[i + 1].start_time_sec);
+        }
+        assert(variable_plan[5].end_time_sec == (action == mkvsplit::BumperAction::Merge ? 18661.664000 : 18314.296000));
+        if (action == mkvsplit::BumperAction::Separate) {
+            assert(variable_plan[6].name_tag == "disc_outro");
+            assert(variable_plan[6].start_time_sec == variable_plan[5].end_time_sec);
+            assert(variable_plan[6].end_time_sec == variable_meta.duration_sec);
+        }
+    }
+    // Respect an explicit filename count instead of overriding it with this heuristic.
+    variable_meta.file_path = "Show E01E02E03.mkv";
+    assert(mkvsplit::MKVSplitter::GuessSplitConfig(variable_meta).recommended_config.chapter_group_sizes.empty());
+    // Uneven runtimes do not provide sufficient evidence for variable grouping.
+    variable_meta.file_path = "Unrelated disc.mkv";
+    for (size_t i = 0; i < 6; ++i) variable_meta.chapters[i].end_time_sec += 500.0;
+    assert(mkvsplit::MKVSplitter::GuessSplitConfig(variable_meta).recommended_config.chapter_group_sizes.empty());
+    for (const auto& bad_groups : {std::vector<int>{0}, std::vector<int>{-1}, std::vector<int>{36}}) {
+        variable_config.chapter_group_sizes = bad_groups;
+        assert(mkvsplit::MKVSplitter::PlanSegments(variable_meta, variable_config).empty());
+    }
+    std::cout << "PASSED: Six variable chapter groups and trailing extra planned correctly.\n\n";
+
+    std::cout << "[Test 15] Chapter boundaries are corroborated by targeted black-frame scans...\n";
+    auto corroborated_meta = unfinalized_meta;
+    for (int i = 0; i < 6; ++i) {
+        mkvsplit::ChapterInfo chapter;
+        chapter.id = i;
+        chapter.start_time_sec = i * 6.0;
+        chapter.end_time_sec = (i + 1) * 6.0;
+        corroborated_meta.chapters.push_back(chapter);
+    }
+    mkvsplit::SplitConfig corroborated_config;
+    corroborated_config.mode = mkvsplit::SplitMode::Chapters;
+    corroborated_config.chapter_group_count = 1;
+    auto confirmed = mkvsplit::MKVSplitter::ValidateChapterBoundaries(corroborated_meta, corroborated_config);
+    assert(confirmed.error.empty());
+    assert((confirmed.supported_by_black == std::vector<bool>{true, true, true, true, true}));
+    // A separate trailing extra must not be counted as an episode boundary.
+    corroborated_config.tail_bumper_chapters = 1;
+    corroborated_config.bumper_action = mkvsplit::BumperAction::Separate;
+    auto with_extra = mkvsplit::MKVSplitter::ValidateChapterBoundaries(corroborated_meta, corroborated_config);
+    assert(with_extra.error.empty() && with_extra.boundaries_sec.size() == 4);
+
+    // Overlapping windows beginning at zero must rewind, and cannot include
+    // black frames outside their requested interval due to keyframe pre-roll.
+    mkvsplit::GapDetectionConfig targeted;
+    targeted.min_gap_duration_sec = 0.25;
+    targeted.scan_targets_sec = {3.0, 3.0};
+    err.clear();
+    auto repeated_gaps = mkvsplit::MKVSplitter::DetectGaps(unfinalized_mkv, targeted, &err);
+    assert(err.empty() && repeated_gaps.size() == 2);
+    targeted.scan_targets_sec = {8.0};
+    targeted.scan_radius_sec = 1.0;
+    assert(mkvsplit::MKVSplitter::DetectGaps(unfinalized_mkv, targeted, &err).empty());
+    assert(err.empty());
+
+    // Use long enough episodes for the auto-classifier; intentionally omit the
+    // third transition. Check both 8-bit and 10-bit luminance samples.
+    for (const std::string pixel_format : {"yuv420p", "yuv420p10le"}) {
+        auto hybrid_mkv = test_dir / ("hybrid_" + pixel_format + ".mkv");
+        std::string hybrid_cmd = "ffmpeg -y -v error -f lavfi -i color=white:s=160x90:r=4:d=720 "
+            "-vf \"drawbox=c=black:t=fill:enable='gte(mod(t,120),118)*lt(t,600)*(lt(t,358)+gte(t,360))'\" "
+            "-c:v libx264 -g 40 -pix_fmt " + pixel_format + " \"" + hybrid_mkv.string() + "\"";
+        int hybrid_ret = std::system(hybrid_cmd.c_str());
+        assert(hybrid_ret == 0);
+        auto hybrid_meta = mkvsplit::MKVSplitter::InspectFile(hybrid_mkv);
+        for (int i = 0; i < 6; ++i) {
+            mkvsplit::ChapterInfo chapter;
+            chapter.id = i;
+            chapter.start_time_sec = i * 120.0;
+            chapter.end_time_sec = (i + 1) * 120.0;
+            hybrid_meta.chapters.push_back(chapter);
+        }
+        auto metadata_guess = mkvsplit::MKVSplitter::GuessSplitConfig(hybrid_meta);
+        auto hybrid_guess = mkvsplit::MKVSplitter::GuessSplitConfig(hybrid_meta, true);
+        auto hybrid_validation = mkvsplit::MKVSplitter::ValidateChapterBoundaries(hybrid_meta, hybrid_guess.recommended_config);
+        assert(hybrid_validation.error.empty());
+        assert((hybrid_validation.supported_by_black == std::vector<bool>{true, true, false, true, true}));
+        assert(hybrid_guess.reasoning.find("4/5 episode boundaries") != std::string::npos);
+        assert(hybrid_guess.reasoning.find("00:06:00.000") != std::string::npos);
+        assert(hybrid_guess.confidence_percent < metadata_guess.confidence_percent);
+        auto hybrid_plan = mkvsplit::MKVSplitter::PlanSegments(hybrid_meta, hybrid_guess.recommended_config);
+        assert(hybrid_plan.size() == 6 && hybrid_plan[3].start_time_sec == 360.0);
+        hybrid_meta.file_path = test_dir / "missing_hybrid_input.mkv";
+        auto unavailable = mkvsplit::MKVSplitter::GuessSplitConfig(hybrid_meta, true);
+        assert(unavailable.reasoning.find("validation unavailable") != std::string::npos);
+        assert(unavailable.confidence_percent == metadata_guess.confidence_percent);
+    }
+    std::cout << "PASSED: Confirmed, missing, and unavailable video evidence handled without moving chapter cuts.\n\n";
+
+    std::cout << "[Test 16] Credits, previews, optional separators, and a long finale...\n";
+    // Metadata regression: variable chapter counts and a double-length finale
+    // previously made this layout collapse into three fixed-size groups.
+    const double gaogaigar_ends[] = {
+        236.103, 764.163, 1599.331, 1726.325, 1755.887, 1761.493,
+        1841.306, 1932.230, 2489.754, 3331.028, 3436.333, 3466.363, 3471.635,
+        3602.399, 3694.624, 4283.780, 5062.925, 5168.030, 5203.532,
+        5317.179, 5408.904, 6106.634, 6799.960, 6905.866, 6935.429, 6941.067,
+        7078.038, 7170.330, 7848.107, 8560.519, 8666.625, 8696.087, 8701.826,
+        8974.499, 9065.957, 9484.475, 10463.687, 10569.259, 10598.922, 10604.694,
+        11055.578, 11147.436, 11798.687, 12395.917, 12511.032, 12541.429, 12547.035,
+        12763.818, 12933.087, 13865.819, 14532.651, 15377.629, 15625.476
+    };
+    mkvsplit::MKVMetadata preview_meta;
+    preview_meta.file_path = "Show - S02E01.mkv";
+    previous_end = 0.0;
+    for (double end : gaogaigar_ends) {
+        mkvsplit::ChapterInfo chapter;
+        chapter.id = static_cast<int>(preview_meta.chapters.size());
+        chapter.start_time_sec = previous_end;
+        chapter.end_time_sec = end;
+        preview_meta.chapters.push_back(chapter);
+        previous_end = end;
+    }
+    preview_meta.duration_sec = 15625.512;
+    auto preview_guess = mkvsplit::MKVSplitter::GuessSplitConfig(preview_meta);
+    assert((preview_guess.recommended_config.chapter_group_sizes == std::vector<int>{6, 7, 6, 7, 7, 7, 7, 6}));
+    assert(preview_guess.recommended_config.tail_bumper_chapters == 0);
+    const double preview_starts[] = {0.0, 1761.493, 3471.635, 5203.532, 6941.067, 8701.826, 10604.694, 12547.035};
+    for (auto action : {mkvsplit::BumperAction::Merge, mkvsplit::BumperAction::Separate, mkvsplit::BumperAction::Discard}) {
+        auto cfg = preview_guess.recommended_config;
+        cfg.bumper_action = action;
+        auto preview_plan = mkvsplit::MKVSplitter::PlanSegments(preview_meta, cfg);
+        assert(preview_plan.size() == 8);
+        for (size_t i = 0; i < 8; ++i) {
+            assert(preview_plan[i].start_time_sec == preview_starts[i]);
+            assert(preview_plan[i].name_tag == "S02E0" + std::to_string(i + 1));
+            if (i < 7) assert(preview_plan[i].end_time_sec == preview_plan[i + 1].start_time_sec);
+        }
+        assert(preview_plan.back().end_time_sec == preview_meta.duration_sec);
+        assert(preview_plan.back().end_time_sec - preview_plan.back().start_time_sec > 3000.0);
+    }
+    std::cout << "PASSED: Eight groups retain the previews and the complete long finale.\n\n";
+
+    std::cout << "[Test 17] Repeated ending detection requires consistent evidence...\n";
+    auto make_chapter_metadata = [](const std::vector<double>& durations) {
+        mkvsplit::MKVMetadata metadata;
+        metadata.file_path = "Unrelated disc.mkv";
+        for (double duration : durations) {
+            mkvsplit::ChapterInfo chapter;
+            chapter.id = static_cast<int>(metadata.chapters.size());
+            chapter.start_time_sec = metadata.duration_sec;
+            metadata.duration_sec += duration;
+            chapter.end_time_sec = metadata.duration_sec;
+            metadata.chapters.push_back(chapter);
+        }
+        return metadata;
+    };
+    std::vector<double> preview_durations = {
+        90, 450, 750, 100, 30, 5,
+        70, 90, 500, 600, 110, 32,
+        80, 90, 450, 750, 105, 29, 6,
+        150, 90, 700, 750, 600, 150
+    };
+    auto unrelated_meta = make_chapter_metadata(preview_durations);
+    auto unrelated_guess = mkvsplit::MKVSplitter::GuessSplitConfig(unrelated_meta);
+    assert((unrelated_guess.recommended_config.chapter_group_sizes == std::vector<int>{6, 6, 7, 6}));
+    auto has_preview_pattern = [](const mkvsplit::MKVMetadata& metadata) {
+        return mkvsplit::MKVSplitter::GuessSplitConfig(metadata).reasoning.find("credits/preview") != std::string::npos;
+    };
+    unrelated_meta.file_path = "Show E01E02E03.mkv";
+    assert(!has_preview_pattern(unrelated_meta));
+    auto inconsistent_durations = preview_durations;
+    inconsistent_durations[4] = 12.0;
+    inconsistent_durations[11] = 55.0;
+    assert(!has_preview_pattern(make_chapter_metadata(inconsistent_durations)));
+    auto oversized_finale = preview_durations;
+    oversized_finale.back() += 5000.0;
+    assert(!has_preview_pattern(make_chapter_metadata(oversized_finale)));
+    std::vector<double> two_endings(preview_durations.begin(), preview_durations.begin() + 12);
+    assert(!has_preview_pattern(make_chapter_metadata(two_endings)));
+    std::vector<double> with_bonus(preview_durations.begin(), preview_durations.begin() + 19);
+    with_bonus.push_back(40.0);
+    auto bonus_guess = mkvsplit::MKVSplitter::GuessSplitConfig(make_chapter_metadata(with_bonus));
+    assert((bonus_guess.recommended_config.chapter_group_sizes == std::vector<int>{6, 6, 7}));
+    assert(bonus_guess.recommended_config.tail_bumper_chapters == 1);
+    std::cout << "PASSED: Generalized pattern, conflicting count, inconsistent endings, and trailing bonus checked.\n\n";
 
     std::cout << "========================================================\n";
     std::cout << " ALL AUTOMATED TESTS COMPLETED SUCCESSFULLY!\n";

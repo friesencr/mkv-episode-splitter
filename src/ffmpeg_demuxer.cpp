@@ -3,6 +3,7 @@
 #include <vector>
 #include <map>
 #include <cmath>
+#include <algorithm>
 
 extern "C" {
 #include <libavformat/avformat.h>
@@ -12,6 +13,7 @@ extern "C" {
 #include <libavutil/timestamp.h>
 #include <libavutil/opt.h>
 #include <libavutil/mathematics.h>
+#include <libavutil/pixdesc.h>
 }
 
 namespace mkvsplit {
@@ -20,6 +22,30 @@ static std::string AvErr2Str(int errnum) {
     char errbuf[AV_ERROR_MAX_STRING_SIZE] = {0};
     av_strerror(errnum, errbuf, sizeof(errbuf));
     return std::string(errbuf);
+}
+
+static double ReadDuration(AVFormatContext* fmt_ctx) {
+    if (fmt_ctx->duration != AV_NOPTS_VALUE && fmt_ctx->duration > 0) {
+        return static_cast<double>(fmt_ctx->duration) / AV_TIME_BASE;
+    }
+
+    // Streaming/unfinalized MKVs may omit both Duration and stream duration tags.
+    // Read packet timestamps without decoding to recover the actual endpoint.
+    double duration = 0.0;
+    AVPacket* packet = av_packet_alloc();
+    while (av_read_frame(fmt_ctx, packet) >= 0) {
+        AVStream* stream = fmt_ctx->streams[packet->stream_index];
+        int64_t timestamp = packet->pts != AV_NOPTS_VALUE ? packet->pts : packet->dts;
+        if (timestamp != AV_NOPTS_VALUE) {
+            double end = (static_cast<double>(timestamp) + std::max<int64_t>(0, packet->duration)) *
+                av_q2d(stream->time_base);
+            duration = std::max(duration, end);
+        }
+        av_packet_unref(packet);
+    }
+    av_packet_free(&packet);
+    av_seek_frame(fmt_ctx, -1, 0, AVSEEK_FLAG_BACKWARD);
+    return duration;
 }
 
 bool FFmpegDemuxer::ReadMetadata(const std::filesystem::path& file_path, MKVMetadata& out_metadata, std::string* error_msg) {
@@ -41,7 +67,7 @@ bool FFmpegDemuxer::ReadMetadata(const std::filesystem::path& file_path, MKVMeta
     }
 
     out_metadata.file_path = file_path;
-    out_metadata.duration_sec = (fmt_ctx->duration != AV_NOPTS_VALUE) ? (static_cast<double>(fmt_ctx->duration) / AV_TIME_BASE) : 0.0;
+    out_metadata.duration_sec = ReadDuration(fmt_ctx);
     
     std::error_code ec;
     out_metadata.file_size_bytes = std::filesystem::file_size(file_path, ec);
@@ -352,17 +378,22 @@ std::vector<double> FFmpegDemuxer::DetectBlackGaps(const std::filesystem::path& 
     AVPacket* pkt = av_packet_alloc();
     AVFrame* frame = av_frame_alloc();
 
-    double file_duration = (fmt_ctx->duration != AV_NOPTS_VALUE) ? (static_cast<double>(fmt_ctx->duration) / AV_TIME_BASE) : 0.0;
-    int max_y = static_cast<int>(std::round(gap_config.black_pixel_threshold * 255.0));
+    double file_duration = gap_config.scan_targets_sec.empty() ? ReadDuration(fmt_ctx) :
+        (fmt_ctx->duration != AV_NOPTS_VALUE ? static_cast<double>(fmt_ctx->duration) / AV_TIME_BASE : 0.0);
     int num_eps = gap_config.expected_episodes;
+    bool scan_failed = false;
 
     // Helper lambda to scan a time range for black gaps
     auto ScanWindow = [&](double window_start, double window_end) {
-        if (window_start > 0.0) {
-            int64_t seek_pts = static_cast<int64_t>(window_start / av_q2d(vst->time_base));
-            av_seek_frame(fmt_ctx, video_stream_idx, seek_pts, AVSEEK_FLAG_BACKWARD);
-            avcodec_flush_buffers(codec_ctx);
+        if (scan_failed) return;
+        int64_t seek_pts = static_cast<int64_t>(window_start / av_q2d(vst->time_base));
+        int seek_result = av_seek_frame(fmt_ctx, video_stream_idx, seek_pts, AVSEEK_FLAG_BACKWARD);
+        if (seek_result < 0) {
+            if (error_msg) *error_msg = "Could not seek for black-frame detection: " + AvErr2Str(seek_result);
+            scan_failed = true;
+            return;
         }
+        avcodec_flush_buffers(codec_ctx);
 
         bool black_active = false;
         double black_start_sec = 0.0;
@@ -377,8 +408,10 @@ std::vector<double> FFmpegDemuxer::DetectBlackGaps(const std::filesystem::path& 
 
             ret = avcodec_send_packet(codec_ctx, pkt);
             if (ret < 0) {
+                if (error_msg) *error_msg = "Could not decode video for black-frame detection: " + AvErr2Str(ret);
+                scan_failed = true;
                 av_packet_unref(pkt);
-                continue;
+                break;
             }
 
             bool stop_window = false;
@@ -391,8 +424,10 @@ std::vector<double> FFmpegDemuxer::DetectBlackGaps(const std::filesystem::path& 
                     frame_sec = last_frame_sec + 0.033;
                 }
                 last_frame_sec = frame_sec;
+                if (frame_sec < window_start) continue;
 
                 if (window_end > 0.0 && frame_sec > window_end) {
+                    last_frame_sec = window_end;
                     stop_window = true;
                     break;
                 }
@@ -404,6 +439,16 @@ std::vector<double> FFmpegDemuxer::DetectBlackGaps(const std::filesystem::path& 
 
                 uint64_t black_count = 0;
                 uint64_t total_samples = 0;
+                const AVPixFmtDescriptor* pixel_format = av_pix_fmt_desc_get(static_cast<AVPixelFormat>(frame->format));
+                if (!pixel_format || (pixel_format->flags & (AV_PIX_FMT_FLAG_RGB | AV_PIX_FMT_FLAG_PAL | AV_PIX_FMT_FLAG_HWACCEL | AV_PIX_FMT_FLAG_BITSTREAM)) ||
+                    pixel_format->comp[0].plane != 0 || pixel_format->comp[0].depth + pixel_format->comp[0].shift > 16) {
+                    if (error_msg) *error_msg = "Unsupported pixel format for black-frame detection";
+                    scan_failed = true;
+                    stop_window = true;
+                    break;
+                }
+                auto luma = pixel_format->comp[0];
+                int max_y = static_cast<int>(std::round(gap_config.black_pixel_threshold * ((1 << luma.depth) - 1)));
                 if (frame->data[0] && frame->linesize[0] > 0) {
                     int w = frame->width;
                     int h = frame->height;
@@ -414,7 +459,13 @@ std::vector<double> FFmpegDemuxer::DetectBlackGaps(const std::filesystem::path& 
                         const uint8_t* row = frame->data[0] + (y * stride);
                         for (int x = 0; x < w; x += step) {
                             total_samples++;
-                            if (row[x] <= max_y) {
+                            const uint8_t* pixel = row + x * luma.step + luma.offset;
+                            unsigned value = pixel[0];
+                            if (luma.depth + luma.shift > 8) {
+                                value = (pixel_format->flags & AV_PIX_FMT_FLAG_BE) ? (pixel[0] << 8) | pixel[1] : pixel[0] | (pixel[1] << 8);
+                            }
+                            value = (value >> luma.shift) & ((1u << luma.depth) - 1);
+                            if (value <= static_cast<unsigned>(max_y)) {
                                 black_count++;
                             }
                         }
@@ -452,7 +503,18 @@ std::vector<double> FFmpegDemuxer::DetectBlackGaps(const std::filesystem::path& 
         }
     };
 
-    if (num_eps > 1 && file_duration > 60.0) {
+    if (!gap_config.scan_targets_sec.empty()) {
+        for (double target : gap_config.scan_targets_sec) {
+            if (!std::isfinite(target) || target < 0.0 || !std::isfinite(gap_config.scan_radius_sec) || gap_config.scan_radius_sec <= 0.0) {
+                if (error_msg) *error_msg = "Invalid black-frame scan window";
+                scan_failed = true;
+                break;
+            }
+            double end = target + gap_config.scan_radius_sec;
+            if (file_duration > 0.0) end = std::min(end, file_duration);
+            ScanWindow(std::max(0.0, target - gap_config.scan_radius_sec), end);
+        }
+    } else if (num_eps > 1 && file_duration > 60.0) {
         // Targeted window seeking: Scan +/- 180s around each expected episode boundary
         double ep_len = file_duration / static_cast<double>(num_eps);
         for (int k = 1; k < num_eps; k++) {
@@ -471,6 +533,7 @@ std::vector<double> FFmpegDemuxer::DetectBlackGaps(const std::filesystem::path& 
     avcodec_free_context(&codec_ctx);
     avformat_close_input(&fmt_ctx);
 
+    if (scan_failed) gap_timestamps.clear();
     return gap_timestamps;
 }
 
