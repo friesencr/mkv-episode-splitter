@@ -33,6 +33,11 @@ target_link_libraries(mkvsplit_core PUBLIC
 add_executable(mkvsplit-cli src/cli_main.cpp)
 target_link_libraries(mkvsplit-cli PRIVATE mkvsplit_core)
 
-# Automated Test Suite Binary
-add_executable(mkvsplit_tests tests/test_splitter.cpp)
-target_link_libraries(mkvsplit_tests PRIVATE mkvsplit_core)
+include(CTest)
+if(BUILD_TESTING)
+    find_program(FFMPEG_EXECUTABLE ffmpeg REQUIRED)
+    add_executable(mkvsplit_tests tests/test_splitter.cpp)
+    target_link_libraries(mkvsplit_tests PRIVATE mkvsplit_core)
+    add_test(NAME splitter COMMAND mkvsplit_tests)
+    set_tests_properties(splitter PROPERTIES TIMEOUT 180)
+endif()

@@ -1,31 +1,29 @@
 #!/bin/bash
-PROJECT_DIR="/home/chris/dev/mkv-splitter"
-DESKTOP_FILE="$HOME/.local/share/applications/mkvsplit.desktop"
+set -euo pipefail
+PROJECT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+APPLICATIONS_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/applications"
+DESKTOP_FILE="$APPLICATIONS_DIR/mkvsplit.desktop"
+mkdir -p -- "$APPLICATIONS_DIR"
 
-mkdir -p "$HOME/.local/share/applications"
-
-cat <<EOF > "$PROJECT_DIR/mkvsplit-launcher.sh"
-#!/bin/bash
-if [ -n "\$1" ]; then
-    "$PROJECT_DIR/build/mkvsplit-cli" -I "\$1"
-else
-    "$PROJECT_DIR/build/mkvsplit-cli"
-fi
-EOF
-
-chmod +x "$PROJECT_DIR/mkvsplit-launcher.sh"
-
-cat <<EOF > "$DESKTOP_FILE"
+# Escape literal characters for a quoted Desktop Entry Exec argument.
+launcher="$PROJECT_DIR/mkvsplit-launcher.sh"
+launcher="${launcher//\\/\\\\}"
+launcher="${launcher//\$/\\\$}"
+launcher="${launcher//\`/\\\`}"
+launcher="${launcher//\"/\\\"}"
+launcher="${launcher//%/%%}"
+cat > "$DESKTOP_FILE" <<EOF
 [Desktop Entry]
 Type=Application
 Name=MKV Splitter (Interactive)
 Comment=Split multi-episode MKV files with auto-detection
-Exec=$PROJECT_DIR/mkvsplit-launcher.sh %f
+Exec=bash "$launcher" %f
 Icon=video-x-generic
 Terminal=true
 Categories=AudioVideo;Video;Utility;
 MimeType=video/x-matroska;
 EOF
-
-chmod +x "$DESKTOP_FILE"
-update-desktop-database "$HOME/.local/share/applications" 2>/dev/null || true
+if command -v update-desktop-database >/dev/null 2>&1; then
+    update-desktop-database "$APPLICATIONS_DIR"
+fi
+printf 'Installed %s\n' "$DESKTOP_FILE"
