@@ -58,7 +58,7 @@ if [[ $target == macos-arm64 ]]; then
     strip "$asset"
     codesign --force --sign - "$asset"
     codesign --verify "$asset"
-    lipo -verify_arch arm64 "$asset"
+    lipo "$asset" -verify_arch arm64
     otool -L "$asset" | awk 'NR > 1 && $1 !~ /^\/(usr\/lib|System\/Library)\// {print "Unexpected dependency:", $1; bad=1} END {exit bad}'
 else
     "$triple-strip" -o "$asset" splitter/mkvsplit-cli.exe
