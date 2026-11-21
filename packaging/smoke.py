@@ -31,7 +31,8 @@ def main():
         output.mkdir()
         parts[0].write_bytes(b"previous output")
         env = os.environ.copy()
-        env["PATH"] = str(Path(env["SystemRoot"]) / "System32") if os.name == "nt" else "/usr/bin:/bin"
+        # The packaged CLI must work without external programs on the search path.
+        env["PATH"] = ""
         subprocess.run([binary, "-i", source, "-m", "duration", "-d", "3", "-o", output],
                        check=True, cwd=work, env=env)
         if set(output.iterdir()) != set(parts):
