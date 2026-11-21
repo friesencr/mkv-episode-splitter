@@ -1,15 +1,21 @@
 cmake_minimum_required(VERSION 3.20)
-project(mkv-splitter VERSION 1.0.0 LANGUAGES C CXX)
+project(mkv-splitter VERSION 0.1.0 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
+
+option(MKVSPLIT_STATIC "Link a standalone Linux executable using static FFmpeg libraries" OFF)
+if(MKVSPLIT_STATIC)
+    set(CMAKE_FIND_LIBRARY_SUFFIXES ".a")
+    set(PKG_CONFIG_ARGN --static)
+    add_link_options(-static)
+endif()
 
 # Find FFmpeg using PkgConfig
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(AVFORMAT REQUIRED IMPORTED_TARGET libavformat)
 pkg_check_modules(AVCODEC REQUIRED IMPORTED_TARGET libavcodec)
 pkg_check_modules(AVUTIL REQUIRED IMPORTED_TARGET libavutil)
-pkg_check_modules(AVFILTER REQUIRED IMPORTED_TARGET libavfilter)
 
 # Core Shared Engine Library
 add_library(mkvsplit_core STATIC
@@ -26,7 +32,6 @@ target_link_libraries(mkvsplit_core PUBLIC
     PkgConfig::AVFORMAT 
     PkgConfig::AVCODEC 
     PkgConfig::AVUTIL
-    PkgConfig::AVFILTER
 )
 
 # CLI Binary

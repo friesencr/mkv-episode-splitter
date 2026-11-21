@@ -9,10 +9,26 @@ intro/outro bumper handling, season/episode filenames, and preservation of audio
 track titles, language metadata, and disposition flags. An interactive terminal
 mode shows a proposed split plan before you start.
 
+## Linux x86-64 alpha download
+
+Download `mkvsplit-cli-linux-x86_64` and `SHA256SUMS` from the same
+[GitHub release](https://github.com/friesencr/mkv-episode-splitter/releases).
+From the download directory:
+
+```sh
+sha256sum --check --ignore-missing SHA256SUMS
+chmod +x mkvsplit-cli-linux-x86_64
+./mkvsplit-cli-linux-x86_64 --help
+```
+
+The standalone binary includes FFmpeg. For alpha feedback, include the expected
+and actual episode boundaries, audio and subtitle track details, and any
+playback timing issues.
+
 ## Build
 
 Requires CMake 3.20+, a C++20 compiler, pkg-config, and FFmpeg development libraries
-(`libavformat`, `libavcodec`, `libavutil`, and `libavfilter`). Tests also require the
+(`libavformat`, `libavcodec`, and `libavutil`). Tests also require the
 `ffmpeg` executable with the `libx264` encoder. Linux CLI tests use `ffprobe`
 to compare packet timestamps and contents.
 
@@ -20,7 +36,7 @@ On Ubuntu/Debian:
 
 ```sh
 sudo apt-get install build-essential cmake pkg-config ffmpeg \
-  libavformat-dev libavcodec-dev libavutil-dev libavfilter-dev
+  libavformat-dev libavcodec-dev libavutil-dev
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build --parallel
 ctest --test-dir build --output-on-failure
@@ -85,6 +101,28 @@ Size mode produces approximate sizes.
 Tests generate synthetic media in `test_run_dir/` under their working directory;
 no sample videos are required. CTest runs them in the build directory. GitHub
 Actions builds and runs the suite in both Debug and Release configurations.
+
+## Standalone release build
+
+Extract the release asset ending in `-source.tar.gz`, or clone the repository
+and run `git submodule update --init --depth 1`. The release source asset
+includes the pinned FFmpeg source in `third_party/ffmpeg`. From the source
+root on Linux x86-64 with Docker and BuildKit:
+
+```sh
+docker build --platform linux/amd64 -f packaging/Dockerfile --output type=local,dest=dist .
+./dist/mkvsplit-cli-linux-x86_64 --help
+```
+
+The build uses musl, FFmpeg's software decoders, libaom for AV1, and zlib. It
+runs the test suite and splits a fixture in an empty container. To rebuild
+against a modified FFmpeg, edit the included submodule sources and run the
+same build command. License notices accompany each release.
+
+Dependabot checks the action revisions, build image, and FFmpeg maintenance
+branch weekly. To publish, push a tag matching the CMake version, such as
+`v0.1.0-alpha.1`. The workflow publishes alpha, beta, and rc tags as
+prereleases after the build and tests pass, then tests the public download.
 
 ## License
 

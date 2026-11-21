@@ -1,4 +1,5 @@
 build/
+dist/
 output/
 test_run_dir/
 samples/

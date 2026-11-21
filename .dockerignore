@@ -1,0 +1,10 @@
+.git
+**/.git
+build
+test_run_dir
+output
+samples
+.agents
+.aws
+.codex
+dist
