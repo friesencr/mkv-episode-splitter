@@ -7,6 +7,15 @@
 
 namespace mkvsplit {
 
+std::string PathToUtf8(const std::filesystem::path& path) {
+    const auto bytes = path.u8string();
+    return {bytes.begin(), bytes.end()};
+}
+
+std::filesystem::path PathFromUtf8(const std::string& text) {
+    return std::filesystem::path(std::u8string(text.begin(), text.end()));
+}
+
 std::string SecondsToTimeString(double total_seconds) {
     if (total_seconds < 0) total_seconds = 0;
     int hours = static_cast<int>(total_seconds) / 3600;

@@ -1,8 +1,13 @@
 #pragma once
 #include <string>
+#include <filesystem>
 #include <cstdint>
 
 namespace mkvsplit {
+
+// The CLI and FFmpeg use UTF-8. Windows filesystem paths use wide characters.
+std::string PathToUtf8(const std::filesystem::path& path);
+std::filesystem::path PathFromUtf8(const std::string& text);
 
 // Convert timestamp in seconds (e.g. 125.45) to HH:MM:SS.mmm formatted string
 std::string SecondsToTimeString(double seconds);

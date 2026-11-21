@@ -9,27 +9,45 @@ intro/outro bumper handling, season/episode filenames, and preservation of audio
 track titles, language metadata, and disposition flags. An interactive terminal
 mode shows a proposed split plan before you start.
 
-## Linux x86-64 alpha download
+## Alpha downloads
 
-Download `mkvsplit-cli-linux-x86_64` and `SHA256SUMS` from the same
-[GitHub release](https://github.com/friesencr/mkv-episode-splitter/releases).
-From the download directory:
+Download the executable for your machine and `SHA256SUMS` from the same
+[alpha release](https://github.com/friesencr/mkv-episode-splitter/releases).
+Each executable includes FFmpeg.
+
+| Platform | Executable |
+| --- | --- |
+| Linux x86-64 | `mkvsplit-cli-linux-x86_64` |
+| Linux ARM64 | `mkvsplit-cli-linux-arm64` |
+| macOS 15 or later on Apple Silicon | `mkvsplit-cli-macos-arm64` |
+| Windows x64 | `mkvsplit-cli-windows-x86_64.exe` |
+
+On Linux, run `sha256sum --check --ignore-missing SHA256SUMS`. On macOS, run
+`shasum -a 256 mkvsplit-cli-macos-arm64` and compare the digest with its entry
+in `SHA256SUMS`. Then make the downloaded file executable and run it. For example:
 
 ```sh
-sha256sum --check --ignore-missing SHA256SUMS
-chmod +x mkvsplit-cli-linux-x86_64
-./mkvsplit-cli-linux-x86_64 --help
+chmod +x mkvsplit-cli-macos-arm64
+./mkvsplit-cli-macos-arm64 --help
 ```
 
-The standalone binary includes FFmpeg. For alpha feedback, include the expected
-and actual episode boundaries, audio and subtitle track details, and any
-playback timing issues.
+On Windows, compare the PowerShell hash with the executable's entry in
+`SHA256SUMS`, then run the CLI:
+
+```powershell
+Get-FileHash .\mkvsplit-cli-windows-x86_64.exe -Algorithm SHA256
+.\mkvsplit-cli-windows-x86_64.exe --help
+```
+
+The macOS alpha uses an ad-hoc signature. The Windows alpha is unsigned.
+For alpha feedback, include the expected and actual episode boundaries, audio
+and subtitle track details, and any playback timing issues.
 
 ## Build
 
 Requires CMake 3.20+, a C++20 compiler, pkg-config, and FFmpeg development libraries
 (`libavformat`, `libavcodec`, and `libavutil`). Tests also require the
-`ffmpeg` executable with the `libx264` encoder. Linux CLI tests use `ffprobe`
+`ffmpeg` executable with the `libx264` encoder. Unix CLI tests use `ffprobe`
 to compare packet timestamps and contents.
 
 On Ubuntu/Debian:
@@ -42,8 +60,7 @@ cmake --build build --parallel
 ctest --test-dir build --output-on-failure
 ```
 
-Linux is the currently verified environment. The launcher scripts require Bash;
-other platforms have not been verified. To build without tests, configure with
+The desktop launcher scripts target Linux. To build without tests, configure with
 `-DBUILD_TESTING=OFF`.
 
 ## Usage
@@ -107,22 +124,41 @@ Actions builds and runs the suite in both Debug and Release configurations.
 Extract the release asset ending in `-source.tar.gz`, or clone the repository
 and run `git submodule update --init --depth 1`. The release source asset
 includes the pinned FFmpeg source in `third_party/ffmpeg`. From the source
-root on Linux x86-64 with Docker and BuildKit:
+root on an x86-64 or ARM64 Linux host with Docker and BuildKit:
 
 ```sh
-docker build --platform linux/amd64 -f packaging/Dockerfile --output type=local,dest=dist .
-./dist/mkvsplit-cli-linux-x86_64 --help
+docker build -f packaging/Dockerfile --output type=local,dest=dist .
 ```
 
-The build uses musl, FFmpeg's software decoders, libaom for AV1, and zlib. It
-runs the test suite and splits a fixture in an empty container. To rebuild
-against a modified FFmpeg, edit the included submodule sources and run the
-same build command. License notices accompany each release.
+This produces a static executable for the host architecture, runs the tests, and
+splits a fixture in an empty container. Both Linux targets use musl.
 
-Dependabot checks the action revisions, build image, and FFmpeg maintenance
+On Apple Silicon with Xcode Command Line Tools and Homebrew:
+
+```sh
+brew install cmake ninja pkgconf make ffmpeg
+bash packaging/build-desktop.sh macos-arm64
+```
+
+To cross-build Windows x64 on Ubuntu 24.04:
+
+```sh
+sudo apt-get install build-essential cmake ninja-build pkg-config nasm curl \
+  g++-mingw-w64-x86-64-posix libz-mingw-w64-dev
+bash packaging/build-desktop.sh windows-x86_64
+```
+
+Each recipe writes its executable to `dist/`. The desktop recipes download and
+checksum the libaom source for AV1 decoding. To relink a modified FFmpeg, edit
+`third_party/ffmpeg` and rerun the recipe for your platform. License notices
+accompany each release.
+
+Dependabot checks the action revisions, Linux build image, and FFmpeg maintenance
 branch weekly. To publish, push a tag matching the CMake version, such as
-`v0.1.0-alpha.1`. The workflow publishes alpha, beta, and rc tags as
-prereleases after the build and tests pass, then tests the public download.
+`v0.1.0-alpha.2`. GitHub Actions runs the packaged CLI on each target before
+publishing, then downloads the public binaries and repeats the splits. It checks
+the source and binary checksums and compares compressed video packets with the
+original MKV. Alpha, beta, and rc tags publish as prereleases.
 
 ## License
 

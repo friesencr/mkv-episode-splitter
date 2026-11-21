@@ -1,0 +1,79 @@
+name: Verify packaged executables
+on:
+  workflow_call:
+    inputs:
+      release-tag:
+        type: string
+        default: ''
+      manifest:
+        type: string
+        default: ''
+
+permissions:
+  contents: read
+
+jobs:
+  split:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {runner: ubuntu-24.04, asset: mkvsplit-cli-linux-x86_64}
+          - {runner: ubuntu-24.04-arm, asset: mkvsplit-cli-linux-arm64}
+          - {runner: macos-15, asset: mkvsplit-cli-macos-arm64}
+          - {runner: windows-2025, asset: mkvsplit-cli-windows-x86_64.exe}
+    runs-on: ${{ matrix.runner }}
+    defaults:
+      run:
+        shell: bash
+    env:
+      ASSET: ${{ matrix.asset }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        if: inputs.release-tag == ''
+        with:
+          name: asset-${{ matrix.asset }}
+          path: dist
+      - name: Verify public downloads against the build manifest
+        if: inputs.release-tag != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.release-tag }}
+          MANIFEST: ${{ inputs.manifest }}
+        run: |
+          if [[ $ASSET == mkvsplit-cli-linux-x86_64 ]]; then
+            gh release download "$TAG" --dir dist
+          else
+            gh release download "$TAG" --dir dist -p "$ASSET" -p SHA256SUMS
+          fi
+          cd dist
+          hash=(sha256sum)
+          if [[ $RUNNER_OS == macOS ]]; then hash=(shasum -a 256); fi
+          echo "$MANIFEST  SHA256SUMS" | "${hash[@]}" -c -
+          if [[ $ASSET == mkvsplit-cli-linux-x86_64 ]]; then
+            "${hash[@]}" -c SHA256SUMS
+          else
+            grep -F "  $ASSET" SHA256SUMS | "${hash[@]}" -c -
+          fi
+      - if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg
+      - if: runner.os == 'macOS'
+        run: brew install ffmpeg
+      - if: runner.os == 'Windows'
+        run: choco install ffmpeg -y --no-progress
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        if: runner.os == 'Windows' && inputs.release-tag == ''
+        with:
+          name: windows-tests
+          path: tests-bin
+      - name: Run the C++ suite on Windows
+        if: runner.os == 'Windows' && inputs.release-tag == ''
+        run: ./tests-bin/mkvsplit_tests.exe
+      - name: Split and verify video packets with the downloaded executable
+        run: python3 packaging/smoke.py "dist/$ASSET"
+      - name: Run the Linux download in an empty container
+        if: runner.os == 'Linux'
+        run: bash packaging/smoke-download.sh "dist/$ASSET"

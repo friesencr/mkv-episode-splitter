@@ -26,7 +26,7 @@ int main() {
 
     std::cout << "[Test 1] Generating synthetic test MKV video with chapters and multi-audio track metadata...\n";
     // Generate 15-second synthetic MKV with video (h264), 2 audio tracks (aac with track titles/languages), and metadata
-    std::string gen_cmd = "ffmpeg -y -f lavfi -i testsrc=duration=15:size=640x360:rate=30 "
+    std::string gen_cmd = "ffmpeg -y -v error -f lavfi -i testsrc=duration=15:size=640x360:rate=30 "
                           "-f lavfi -i sine=frequency=440:duration=15 "
                           "-f lavfi -i sine=frequency=880:duration=15 "
                           "-map 0:v -map 1:a -map 2:a "
@@ -34,7 +34,7 @@ int main() {
                           "-metadata title=\"Synthetic Test Video\" "
                           "-metadata:s:a:0 title=\"English (Main)\" -metadata:s:a:0 language=eng "
                           "-metadata:s:a:1 title=\"English (Commentary)\" -metadata:s:a:1 language=eng "
-                          "\"" + test_mkv.string() + "\" > /dev/null 2>&1";
+                          "\"" + test_mkv.string() + "\"";
 
     int ret = std::system(gen_cmd.c_str());
     if (ret != 0 || !std::filesystem::exists(test_mkv)) {
@@ -107,10 +107,10 @@ int main() {
 
     std::cout << "[Test 5] Testing Auto Gap Detection (MKVSplitter::DetectGaps)...\n";
     std::filesystem::path silence_mkv = test_dir / "silence_gap_test.mkv";
-    std::string gen_gap_cmd = "ffmpeg -y -f lavfi -i testsrc=duration=10:size=320x240:rate=30 "
+    std::string gen_gap_cmd = "ffmpeg -y -v error -f lavfi -i testsrc=duration=10:size=320x240:rate=30 "
                               "-f lavfi -t 10 -i anullsrc=r=44100:cl=mono "
                               "-c:v libx264 -pix_fmt yuv420p -g 30 -c:a aac "
-                              "\"" + silence_mkv.string() + "\" > /dev/null 2>&1";
+                              "\"" + silence_mkv.string() + "\"";
     int r2 = std::system(gen_gap_cmd.c_str());
     CHECK(r2 == 0 && std::filesystem::exists(silence_mkv));
 
@@ -128,13 +128,13 @@ int main() {
 
     std::cout << "[Test 6] Testing Black Frame Episode Gap Detection (GapType::BlackFrame)...\n";
     std::filesystem::path black_gap_mkv = test_dir / "black_gap_episode_test.mkv";
-    std::string gen_black_cmd = "ffmpeg -y -f lavfi -i testsrc=duration=4:size=320x240:rate=30 "
+    std::string gen_black_cmd = "ffmpeg -y -v error -f lavfi -i testsrc=duration=4:size=320x240:rate=30 "
                                 "-f lavfi -i color=c=black:duration=1:size=320x240:rate=30 "
                                 "-f lavfi -i testsrc=duration=4:size=320x240:rate=30 "
                                 "-filter_complex \"[0:v][1:v][2:v]concat=n=3:v=1:a=0[v]\" "
                                 "-f lavfi -t 9 -i anullsrc=r=44100:cl=mono "
                                 "-map \"[v]\" -map 3:a -c:v libx264 -pix_fmt yuv420p -g 30 -c:a aac "
-                                "\"" + black_gap_mkv.string() + "\" > /dev/null 2>&1";
+                                "\"" + black_gap_mkv.string() + "\"";
     int r3 = std::system(gen_black_cmd.c_str());
     CHECK(r3 == 0 && std::filesystem::exists(black_gap_mkv));
 

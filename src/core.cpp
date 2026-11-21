@@ -252,7 +252,7 @@ AutoGuessResult MKVSplitter::GuessSplitConfig(const MKVMetadata& metadata, bool 
 
     double total_duration = metadata.duration_sec;
     size_t num_ch = metadata.chapters.size();
-    int filename_episodes = EpisodeCountFromFilename(metadata.file_path.stem().string());
+    int filename_episodes = EpisodeCountFromFilename(PathToUtf8(metadata.file_path.stem()));
 
     if (num_ch > 0) {
         std::vector<double> ch_durations;
@@ -504,7 +504,7 @@ std::vector<SplitSegment> MKVSplitter::PlanSegments(const MKVMetadata& metadata,
     std::string parsed_show_name;
 
     int auto_s = 0, auto_e = 0;
-    if (ParseSeasonEpisodeFromFilename(metadata.file_path.stem().string(), auto_s, auto_e, parsed_show_name)) {
+    if (ParseSeasonEpisodeFromFilename(PathToUtf8(metadata.file_path.stem()), auto_s, auto_e, parsed_show_name)) {
         if (config.season_number <= 0) season = auto_s;
         if (config.start_episode_number <= 0) start_ep = auto_e;
     }
@@ -767,7 +767,7 @@ std::vector<SplitSegment> MKVSplitter::PlanSegments(const MKVMetadata& metadata,
 
 bool MKVSplitter::Split(const SplitConfig& config, ProgressCallback callback, std::string* error_msg) {
     if (!std::filesystem::exists(config.input_file)) {
-        if (error_msg) *error_msg = "Input file does not exist: " + config.input_file.string();
+        if (error_msg) *error_msg = "Input file does not exist: " + PathToUtf8(config.input_file);
         return false;
     }
 
@@ -792,12 +792,12 @@ bool MKVSplitter::ExecutePlan(const SplitConfig& config, const std::vector<Split
     std::error_code ec;
     if (!config.output_directory.empty()) std::filesystem::create_directories(config.output_directory, ec);
     if (ec) {
-        if (error_msg) *error_msg = "Could not create output directory '" + config.output_directory.string() + "': " + ec.message();
+        if (error_msg) *error_msg = "Could not create output directory '" + PathToUtf8(config.output_directory) + "': " + ec.message();
         return false;
     }
 
     int total_segments = static_cast<int>(segments.size());
-    std::string stem = config.input_file.stem().string();
+    std::string stem = PathToUtf8(config.input_file.stem());
 
     for (int i = 0; i < total_segments; i++) {
         const auto& seg = segments[i];
@@ -818,12 +818,12 @@ bool MKVSplitter::ExecutePlan(const SplitConfig& config, const std::vector<Split
             filename_ss << stem << "_" << seg.name_tag << ".mkv";
         }
 
-        std::filesystem::path out_file = config.output_directory / filename_ss.str();
+        std::filesystem::path out_file = config.output_directory / PathFromUtf8(filename_ss.str());
 
         ProgressInfo info;
         info.current_segment_index = i + 1;
         info.total_segments = total_segments;
-        info.current_output_filename = out_file.filename().string();
+        info.current_output_filename = PathToUtf8(out_file.filename());
         info.overall_progress = (static_cast<double>(i) / total_segments) * 100.0;
 
         if (callback) callback(info);

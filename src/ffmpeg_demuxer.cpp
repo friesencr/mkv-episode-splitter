@@ -1,4 +1,5 @@
 #include "mkvsplit/ffmpeg_demuxer.hpp"
+#include "mkvsplit/utils.hpp"
 #include <iostream>
 #include <vector>
 #include <map>
@@ -52,7 +53,7 @@ static double ReadDuration(AVFormatContext* fmt_ctx) {
 bool FFmpegDemuxer::ReadMetadata(const std::filesystem::path& file_path, MKVMetadata& out_metadata, std::string* error_msg) {
     av_log_set_level(AV_LOG_ERROR);
     AVFormatContext* fmt_ctx = nullptr;
-    std::string path_str = file_path.string();
+    std::string path_str = PathToUtf8(file_path);
 
     int ret = avformat_open_input(&fmt_ctx, path_str.c_str(), nullptr, nullptr);
     if (ret < 0) {
@@ -78,7 +79,7 @@ bool FFmpegDemuxer::ReadMetadata(const std::filesystem::path& file_path, MKVMeta
     if (tag && tag->value) {
         out_metadata.title = tag->value;
     } else {
-        out_metadata.title = file_path.stem().string();
+        out_metadata.title = PathToUtf8(file_path.stem());
     }
 
     // Inspect streams
@@ -226,7 +227,7 @@ std::vector<double> FFmpegDemuxer::DetectSilenceGaps(const std::filesystem::path
                                                      std::string* error_msg) {
     std::vector<double> gap_timestamps;
     AVFormatContext* fmt_ctx = nullptr;
-    std::string path_str = input_path.string();
+    std::string path_str = PathToUtf8(input_path);
 
     int ret = avformat_open_input(&fmt_ctx, path_str.c_str(), nullptr, nullptr);
     if (ret < 0) {
@@ -344,7 +345,7 @@ std::vector<double> FFmpegDemuxer::DetectBlackGaps(const std::filesystem::path& 
                                                    std::string* error_msg) {
     std::vector<double> gap_timestamps;
     AVFormatContext* fmt_ctx = nullptr;
-    std::string path_str = input_path.string();
+    std::string path_str = PathToUtf8(input_path);
 
     int ret = avformat_open_input(&fmt_ctx, path_str.c_str(), nullptr, nullptr);
     if (ret < 0) {
@@ -546,8 +547,8 @@ static bool RemuxSegment(const std::filesystem::path& input_path,
     av_log_set_level(AV_LOG_ERROR);
     AVFormatContext* ifmt_ctx = nullptr;
     AVFormatContext* ofmt_ctx = nullptr;
-    std::string in_str = input_path.string();
-    std::string out_str = output_path.string();
+    std::string in_str = PathToUtf8(input_path);
+    std::string out_str = PathToUtf8(output_path);
 
     int ret = avformat_open_input(&ifmt_ctx, in_str.c_str(), nullptr, nullptr);
     if (ret < 0) {
@@ -790,7 +791,7 @@ bool FFmpegDemuxer::WriteSegment(const std::filesystem::path& input_path,
                                  std::string* error_msg) {
     namespace fs = std::filesystem;
     auto fail = [&](const std::string& reason) {
-        if (error_msg) *error_msg = "Failed to write '" + output_path.string() + "': " + reason;
+        if (error_msg) *error_msg = "Failed to write '" + PathToUtf8(output_path) + "': " + reason;
         return false;
     };
 

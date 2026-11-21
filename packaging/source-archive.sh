@@ -3,7 +3,8 @@ set -euo pipefail
 tag=${1:?expected a release tag}
 bash packaging/release-tag.sh "$tag" >/dev/null
 dest=$(realpath "${2:?expected the artifact directory}")
-test -f "$dest/mkvsplit-cli-linux-x86_64"
+binaries=(mkvsplit-cli-linux-x86_64 mkvsplit-cli-linux-arm64 mkvsplit-cli-macos-arm64 mkvsplit-cli-windows-x86_64.exe)
+for binary in "${binaries[@]}"; do test -s "$dest/$binary"; done
 work=$(mktemp -d)
 trap 'rm -rf -- "$work"' EXIT
 root="mkv-episode-splitter-$tag"
@@ -16,4 +17,4 @@ tar --sort=name --owner=0 --group=0 --numeric-owner --mtime="@$(git show -s --fo
 cat "$work/$root/packaging/NOTICES" "$work/$root/LICENSE" \
     "$work/$root/third_party/ffmpeg/COPYING.LGPLv2.1" "$work/$root"/packaging/licenses/*.txt > "$dest/LICENSES.txt"
 cd "$dest"
-sha256sum mkvsplit-cli-linux-x86_64 "$root-source.tar.gz" LICENSES.txt > SHA256SUMS
+sha256sum "${binaries[@]}" "$root-source.tar.gz" LICENSES.txt > SHA256SUMS

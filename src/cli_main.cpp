@@ -7,6 +7,12 @@
 #include <filesystem>
 #include <iomanip>
 #include <optional>
+#ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#endif
 
 static std::string CleanPath(const std::string& raw) {
     std::string s = raw;
@@ -22,6 +28,9 @@ static std::string CleanPath(const std::string& raw) {
     while (!s.empty() && (s.front() == '\'' || s.front() == '"')) s.erase(s.begin());
     while (!s.empty() && (s.back() == '\'' || s.back() == '"')) s.pop_back();
 
+#ifdef _WIN32
+    return s;
+#else
     // Strip backslash escapes added by Linux/macOS terminal drag-and-drop
     std::string clean;
     for (size_t i = 0; i < s.length(); i++) {
@@ -31,9 +40,10 @@ static std::string CleanPath(const std::string& raw) {
         clean += s[i];
     }
     return clean;
+#endif
 }
 
-void PrintUsage(const char* prog) {
+void PrintUsage(const std::string& prog) {
     std::cout << "mkvsplit-cli - High Performance Cross-Platform MKV Splitter\n\n"
               << "Usage: " << prog << " [options] [input.mkv]\n\n"
               << "Options:\n"
@@ -86,21 +96,20 @@ int RunInteractiveMode(std::string input_file = "") {
     std::cout << "  MKV SPLITTER — Interactive Mode\n";
     std::cout << "========================================================\n\n";
 
-    input_file = CleanPath(input_file);
     while (input_file.empty()) {
         std::cout << "Drag and drop an MKV file here (or type path): ";
         std::string raw;
         if (!std::getline(std::cin, raw)) return 0;
         input_file = CleanPath(raw);
         if (input_file.empty()) continue;
-        if (!std::filesystem::exists(input_file)) {
+        if (!std::filesystem::exists(mkvsplit::PathFromUtf8(input_file))) {
             std::cout << "Error: File '" << input_file << "' does not exist. Try again.\n\n";
             input_file.clear();
         }
     }
 
     std::string err_msg;
-    mkvsplit::MKVMetadata meta = mkvsplit::MKVSplitter::InspectFile(input_file, &err_msg);
+    mkvsplit::MKVMetadata meta = mkvsplit::MKVSplitter::InspectFile(mkvsplit::PathFromUtf8(input_file), &err_msg);
     if (meta.tracks.empty()) {
         std::cerr << "Error inspecting file: " << (err_msg.empty() ? "Unable to read MKV metadata" : err_msg) << "\n";
         return 1;
@@ -112,7 +121,7 @@ int RunInteractiveMode(std::string input_file = "") {
     std::cout << "\n========================================================\n";
     std::cout << " FILE METADATA SUMMARY\n";
     std::cout << "========================================================\n";
-    std::cout << " File:     " << meta.file_path.filename().string() << "\n";
+    std::cout << " File:     " << mkvsplit::PathToUtf8(meta.file_path.filename()) << "\n";
     std::cout << " Size:     " << mkvsplit::FormatBytes(meta.file_size_bytes) << "\n";
     std::cout << " Duration: " << mkvsplit::FormatDuration(meta.duration_sec) << " (" << meta.duration_sec << " s)\n";
     std::cout << " Tracks:   " << meta.tracks.size() << " total\n";
@@ -130,11 +139,11 @@ int RunInteractiveMode(std::string input_file = "") {
     std::cout << "========================================================\n\n";
 
     mkvsplit::SplitConfig config;
-    config.input_file = input_file;
+    config.input_file = mkvsplit::PathFromUtf8(input_file);
     config.output_directory = "./output";
 
     config = guess.recommended_config;
-    config.input_file = input_file;
+    config.input_file = mkvsplit::PathFromUtf8(input_file);
     config.output_directory = "./output";
 
     std::vector<mkvsplit::SplitSegment> plan;
@@ -175,7 +184,7 @@ int RunInteractiveMode(std::string input_file = "") {
                      config.bumper_action == mkvsplit::BumperAction::Separate ? "Export disc intro/outro as separate files (disc_intro.mkv / disc_outro.mkv)" : "Discard intro/outro bumpers") << "\n";
         std::cout << " [3] Season & Start Ep: Season " << (config.season_number > 0 ? config.season_number : 1) 
                   << ", Start Ep " << (config.start_episode_number > 0 ? config.start_episode_number : 1) << " (Plex/Kodi Format)\n";
-        std::cout << " [4] Output Directory:  " << config.output_directory.string() << "\n";
+        std::cout << " [4] Output Directory:  " << mkvsplit::PathToUtf8(config.output_directory) << "\n";
         std::cout << "--------------------------------------------------------\n";
         std::cout << " PREVIEW SPLIT FILES:\n";
         int preview_count = std::min(5, static_cast<int>(plan.size()));
@@ -209,7 +218,7 @@ int RunInteractiveMode(std::string input_file = "") {
             smode = CleanPath(smode);
             if (smode == "1") {
                 config = guess.recommended_config;
-                config.input_file = input_file;
+                config.input_file = mkvsplit::PathFromUtf8(input_file);
                 config.output_directory = "./output";
             } else if (smode == "2") {
                 config.mode = mkvsplit::SplitMode::Chapters;
@@ -274,7 +283,7 @@ int RunInteractiveMode(std::string input_file = "") {
             std::string od;
             std::getline(std::cin, od);
             od = CleanPath(od);
-            if (!od.empty()) config.output_directory = od;
+            if (!od.empty()) config.output_directory = mkvsplit::PathFromUtf8(od);
         }
     }
 
@@ -303,7 +312,7 @@ int RunInteractiveMode(std::string input_file = "") {
     std::cout << "\n========================================================\n";
 
     if (success) {
-        std::cout << " SUCCESS: Split completed! Files saved to: " << config.output_directory.string() << "\n";
+        std::cout << " SUCCESS: Split completed! Files saved to: " << mkvsplit::PathToUtf8(config.output_directory) << "\n";
         std::cout << "========================================================\n";
     } else {
         std::cerr << " ERROR during split: " << err_msg << "\n";
@@ -316,7 +325,8 @@ int RunInteractiveMode(std::string input_file = "") {
     return success ? 0 : 1;
 }
 
-int main(int argc, char* argv[]) {
+static int RunCli(const std::vector<std::string>& argv) {
+    const auto argc = argv.size();
     bool interactive = false;
     std::string input_file;
     std::string output_dir = "./output";
@@ -343,7 +353,7 @@ int main(int argc, char* argv[]) {
         return RunInteractiveMode();
     }
 
-    for (int i = 1; i < argc; i++) {
+    for (size_t i = 1; i < argc; i++) {
         std::string arg = argv[i];
         if ((arg == "-i" || arg == "--input") && i + 1 < argc) {
             input_file = argv[++i];
@@ -410,14 +420,14 @@ int main(int argc, char* argv[]) {
     }
 
     std::string err_msg;
-    mkvsplit::MKVMetadata meta = mkvsplit::MKVSplitter::InspectFile(input_file, &err_msg);
+    mkvsplit::MKVMetadata meta = mkvsplit::MKVSplitter::InspectFile(mkvsplit::PathFromUtf8(input_file), &err_msg);
     if (meta.tracks.empty()) {
         std::cerr << "Error inspecting file: " << (err_msg.empty() ? "Unable to read MKV metadata" : err_msg) << "\n";
         return 1;
     }
 
     std::cout << "========================================================\n";
-    std::cout << " File:     " << meta.file_path.filename().string() << "\n";
+    std::cout << " File:     " << mkvsplit::PathToUtf8(meta.file_path.filename()) << "\n";
     std::cout << " Size:     " << mkvsplit::FormatBytes(meta.file_size_bytes) << "\n";
     std::cout << " Duration: " << mkvsplit::FormatDuration(meta.duration_sec) << " (" << meta.duration_sec << " s)\n";
     std::cout << " Tracks:   " << meta.tracks.size() << " total\n";
@@ -447,8 +457,8 @@ int main(int argc, char* argv[]) {
     }
 
     mkvsplit::SplitConfig config;
-    config.input_file = input_file;
-    config.output_directory = output_dir;
+    config.input_file = mkvsplit::PathFromUtf8(input_file);
+    config.output_directory = mkvsplit::PathFromUtf8(output_dir);
     config.season_number = season_num;
     config.start_episode_number = start_ep_num;
 
@@ -461,8 +471,8 @@ int main(int argc, char* argv[]) {
     } else if (mode_str == "auto") {
         if (guess.recommended_config.mode == mkvsplit::SplitMode::Chapters) {
             config = guess.recommended_config;
-            config.input_file = input_file;
-            config.output_directory = output_dir;
+            config.input_file = mkvsplit::PathFromUtf8(input_file);
+            config.output_directory = mkvsplit::PathFromUtf8(output_dir);
             if (season_num > 0) config.season_number = season_num;
             if (start_ep_num > 0) config.start_episode_number = start_ep_num;
         } else {
@@ -570,3 +580,24 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 }
+
+#ifdef _WIN32
+int wmain(int argc, wchar_t* argv[]) {
+    std::vector<std::string> args;
+    for (int i = 0; i < argc; ++i) {
+        args.push_back(mkvsplit::PathToUtf8(argv[i]));
+    }
+    auto input_cp = GetConsoleCP();
+    auto output_cp = GetConsoleOutputCP();
+    SetConsoleCP(CP_UTF8);
+    SetConsoleOutputCP(CP_UTF8);
+    int result = RunCli(args);
+    if (input_cp) SetConsoleCP(input_cp);
+    if (output_cp) SetConsoleOutputCP(output_cp);
+    return result;
+}
+#else
+int main(int argc, char* argv[]) {
+    return RunCli({argv, argv + argc});
+}
+#endif

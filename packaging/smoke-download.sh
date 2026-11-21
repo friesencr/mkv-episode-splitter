@@ -15,7 +15,7 @@ RUN ["/mkvsplit-cli", "-i", "/input.mkv", "-m", "duration", "-d", "3", "-o", "/o
 FROM scratch
 COPY --from=smoke /output/ /
 DOCKER
-"$engine" build --no-cache --platform linux/amd64 --output "type=local,dest=$work/result" "$work"
+"$engine" build --no-cache --output "type=local,dest=$work/result" "$work"
 for part in 1 2; do
     ffmpeg -v error -xerror -i "$work/result/split_input_part$part.mkv" -f null -
 done

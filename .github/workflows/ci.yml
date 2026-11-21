@@ -29,33 +29,76 @@ jobs:
         run: for script in *.sh packaging/*.sh tests/*.sh; do bash -n "$script" || exit 1; done
 
   standalone:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {runner: ubuntu-24.04, target: linux-x86_64, asset: mkvsplit-cli-linux-x86_64}
+          - {runner: ubuntu-24.04-arm, target: linux-arm64, asset: mkvsplit-cli-linux-arm64}
+          - {runner: macos-15, target: macos-arm64, asset: mkvsplit-cli-macos-arm64}
+          - {runner: ubuntu-24.04, target: windows-x86_64, asset: mkvsplit-cli-windows-x86_64.exe}
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          submodules: true
+          persist-credentials: false
+      - name: Build and test in native Linux containers
+        if: startsWith(matrix.target, 'linux')
+        run: docker build -f packaging/Dockerfile --output type=local,dest=dist .
+      - name: Install macOS build and test tools
+        if: matrix.target == 'macos-arm64'
+        run: brew install cmake ninja pkgconf make ffmpeg
+      - name: Install Windows cross-compiler and libraries
+        if: matrix.target == 'windows-x86_64'
+        run: sudo apt-get update && sudo apt-get install -y g++-mingw-w64-x86-64-posix libz-mingw-w64-dev nasm ninja-build pkg-config
+      - name: Build standalone desktop executable
+        if: startsWith(matrix.target, 'linux') == false
+        run: bash packaging/build-desktop.sh "${{ matrix.target }}"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: asset-${{ matrix.asset }}
+          path: dist/${{ matrix.asset }}
+          if-no-files-found: error
+          compression-level: 0
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: matrix.target == 'windows-x86_64'
+        with:
+          name: windows-tests
+          path: build/standalone-windows-x86_64/splitter/mkvsplit_tests.exe
+          if-no-files-found: error
+
+  verify-packages:
+    needs: standalone
+    uses: ./.github/workflows/smoke.yml
+
+  package:
+    if: github.event_name == 'push' && github.ref_type == 'tag'
+    needs: standalone
     runs-on: ubuntu-24.04
     outputs:
-      prerelease: ${{ steps.tag.outputs.prerelease }}
-      commit: ${{ steps.tag.outputs.commit }}
+      prerelease: ${{ steps.package.outputs.prerelease }}
+      commit: ${{ steps.package.outputs.commit }}
       manifest: ${{ steps.package.outputs.manifest }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           submodules: true
           persist-credentials: false
-      - name: Validate release tag
-        if: github.ref_type == 'tag'
-        id: tag
-        run: |
-          prerelease=$(bash packaging/release-tag.sh "$GITHUB_REF_NAME")
-          echo "prerelease=$prerelease" >> "$GITHUB_OUTPUT"
-          echo "commit=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
-      - name: Build and test the static CLI, including a split in an empty container
-        run: docker build --platform linux/amd64 -f packaging/Dockerfile --output type=local,dest=dist .
-      - name: Package corresponding sources and checksums
-        if: github.ref_type == 'tag'
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: asset-*
+          merge-multiple: true
+          path: dist
+      - name: Package corresponding sources and release checksums
         id: package
         run: |
+          prerelease=$(bash packaging/release-tag.sh "$GITHUB_REF_NAME")
           bash packaging/source-archive.sh "$GITHUB_REF_NAME" dist
+          echo "prerelease=$prerelease" >> "$GITHUB_OUTPUT"
+          echo "commit=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
           echo "manifest=$(sha256sum dist/SHA256SUMS | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        if: github.ref_type == 'tag'
         with:
           name: release-assets
           path: dist/
@@ -63,7 +106,7 @@ jobs:
           compression-level: 0
 
   publish:
-    needs: [test, standalone]
+    needs: [test, package, verify-packages]
     if: github.event_name == 'push' && github.ref_type == 'tag'
     runs-on: ubuntu-24.04
     permissions:
@@ -79,44 +122,30 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
-          PRERELEASE: ${{ needs.standalone.outputs.prerelease }}
-          TESTED_COMMIT: ${{ needs.standalone.outputs.commit }}
+          PRERELEASE: ${{ needs.package.outputs.prerelease }}
+          TESTED_COMMIT: ${{ needs.package.outputs.commit }}
         run: |
           set -euo pipefail
           tag="$GITHUB_REF_NAME"
           test "$(gh api "repos/$GH_REPO/commits/$tag" --jq .sha)" = "$TESTED_COMMIT"
           sha256sum -c SHA256SUMS
           latest=true
-          notes='Standalone Linux x86-64 CLI. Download the binary and SHA256SUMS, check its SHA-256, then run chmod +x on the binary. The binary includes FFmpeg under LGPL 2.1 or later. The source archive includes matching sources, license notices, and rebuild instructions.'
+          notes='Standalone CLI for Linux x86-64, Linux ARM64, Apple Silicon (macOS 15+), and Windows x64. Download the executable for your OS and SHA256SUMS. Check its SHA-256. On Linux and macOS, run chmod +x on the file. The binary includes FFmpeg under LGPL 2.1 or later. The source archive includes matching sources, license notices, and rebuild instructions.'
           if [[ $PRERELEASE == true ]]; then
             latest=false
-            notes+=$'\n\nTesting prerelease. CI exercised synthetic MKVs, packet timing, chapter selection, gap detection, write failures, and a split in an empty Linux container. On real disc rips, please report expected and actual episode boundaries, audio and subtitle track preservation, and playback timing.'
+            notes+=$'\n\nTesting prerelease. CI exercised synthetic MKVs, packet timing, chapter selection, gap detection, write failures, and splitting a synthetic MKV with each packaged executable. Linux downloads also ran in empty containers. On real disc rips, please report expected and actual episode boundaries, audio and subtitle track preservation, and playback timing.'
           fi
           if draft=$(gh release view "$tag" --json isDraft --jq .isDraft); then
             if [[ $draft == false ]]; then exit 0; fi
           else
             gh release create "$tag" --draft --verify-tag --title "$tag" --generate-notes --notes "$notes" --prerelease="$PRERELEASE"
           fi
-          gh release upload "$tag" --clobber mkvsplit-cli-linux-x86_64 *-source.tar.gz LICENSES.txt SHA256SUMS
+          gh release upload "$tag" --clobber mkvsplit-cli-* *-source.tar.gz LICENSES.txt SHA256SUMS
           gh release edit "$tag" --draft=false --prerelease="$PRERELEASE" --latest="$latest"
 
   verify-download:
-    needs: [standalone, publish]
-    runs-on: ubuntu-24.04
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - name: Verify public release downloads against the build manifest
-        env:
-          GH_TOKEN: ${{ github.token }}
-          EXPECTED_MANIFEST: ${{ needs.standalone.outputs.manifest }}
-        run: |
-          gh release download "$GITHUB_REF_NAME" --dir dist
-          cd dist
-          echo "$EXPECTED_MANIFEST  SHA256SUMS" | sha256sum -c -
-          sha256sum -c SHA256SUMS
-      - name: Split with the downloaded binary in a fresh scratch container
-        run: |
-          sudo apt-get update && sudo apt-get install -y ffmpeg
-          bash packaging/smoke-download.sh dist/mkvsplit-cli-linux-x86_64
+    needs: [package, publish]
+    uses: ./.github/workflows/smoke.yml
+    with:
+      release-tag: ${{ github.ref_name }}
+      manifest: ${{ needs.package.outputs.manifest }}

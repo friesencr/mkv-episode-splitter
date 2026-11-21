@@ -4,11 +4,13 @@ project(mkv-splitter VERSION 0.1.0 LANGUAGES C CXX)
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-option(MKVSPLIT_STATIC "Link a standalone Linux executable using static FFmpeg libraries" OFF)
+option(MKVSPLIT_STATIC "Link the standalone executable with static FFmpeg libraries" OFF)
 if(MKVSPLIT_STATIC)
     set(CMAKE_FIND_LIBRARY_SUFFIXES ".a")
     set(PKG_CONFIG_ARGN --static)
-    add_link_options(-static)
+    if(NOT APPLE)
+        add_link_options(-static)
+    endif()
 endif()
 
 # Find FFmpeg using PkgConfig
@@ -37,15 +39,18 @@ target_link_libraries(mkvsplit_core PUBLIC
 # CLI Binary
 add_executable(mkvsplit-cli src/cli_main.cpp)
 target_link_libraries(mkvsplit-cli PRIVATE mkvsplit_core)
+if(MINGW)
+    target_link_options(mkvsplit-cli PRIVATE -municode)
+endif()
 
 include(CTest)
 if(BUILD_TESTING)
-    find_program(FFMPEG_EXECUTABLE ffmpeg REQUIRED)
     add_executable(mkvsplit_tests tests/test_splitter.cpp)
     target_link_libraries(mkvsplit_tests PRIVATE mkvsplit_core)
     add_test(NAME splitter COMMAND mkvsplit_tests)
     set_tests_properties(splitter PROPERTIES TIMEOUT 180)
-    if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    if(UNIX)
+        find_program(FFMPEG_EXECUTABLE ffmpeg REQUIRED)
         find_program(FFPROBE_EXECUTABLE ffprobe REQUIRED)
         add_test(NAME cli_split_output COMMAND bash "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_split_output.sh"
                  $<TARGET_FILE:mkvsplit-cli> "${FFMPEG_EXECUTABLE}" "${FFPROBE_EXECUTABLE}")

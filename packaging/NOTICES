@@ -7,11 +7,12 @@ based on the work of the Independent JPEG Group.
 
 The matching release source archive includes the full splitter and FFmpeg
 source trees, their Git revisions, and the build recipe. To relink a modified
-FFmpeg, change third_party/ffmpeg and rebuild using packaging/Dockerfile.
+FFmpeg, change third_party/ffmpeg and rebuild using the matching platform recipe.
 See the release build instructions in README.md.
 
 Additional static components and their notices in packaging/licenses:
-  musl libc                       musl.txt
-  GCC runtime and libstdc++       gpl3.txt and gcc.txt (GCC Runtime Library Exception)
-  Alliance for Open Media libaom  aom.txt and patent.txt
-  zlib                            zlib.txt
+  musl libc (Linux)                                musl.txt
+  GCC runtime and libstdc++ (Linux and Windows)    gpl3.txt and gcc.txt (GCC Runtime Library Exception)
+  Alliance for Open Media libaom                   aom.txt and patent.txt
+  zlib                                             zlib.txt
+  MinGW-w64 runtime (Windows)                      mingw-w64.txt and winpthreads.txt
